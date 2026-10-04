@@ -1,4 +1,4 @@
-from PySide6.QtCore import Qt, Slot, QUrl, QThread, Signal, QRectF, QPointF
+from PySide6.QtCore import Qt, Slot, QUrl, QThread, Signal, QRectF, QPointF, QTimer
 from PySide6.QtGui import QDesktopServices, QColor, QPainter, QPen, QLinearGradient, QPainterPath, QFont
 from PySide6.QtWidgets import (QDialog, QFileDialog, QGridLayout, QLabel,
                                QLineEdit, QPushButton, QVBoxLayout, QComboBox,
@@ -36,7 +36,7 @@ from utils.video.playback_backend import (
     PLAYBACK_BACKEND_DISPLAY_NAMES,
     MPV_RUNTIME_SEARCHED_DIRS,
     VLC_RUNTIME_SEARCHED_DIRS,
-    get_playback_backend_status,
+    request_playback_backend,
     resolve_runtime_playback_backend,
     normalize_playback_backend_name,
     playback_backend_display_name,
@@ -2402,8 +2402,10 @@ class SettingsDialog(QDialog):
     def _add_gpu_video_settings(self, grid_layout: QGridLayout, start_row: int):
         """Add advanced GPU/video backend settings block."""
         row = start_row
-        mpv_available, mpv_error = get_playback_backend_status(PLAYBACK_BACKEND_MPV)
-        vlc_available, vlc_error = get_playback_backend_status('vlc_experimental')
+        mpv_state = request_playback_backend(PLAYBACK_BACKEND_MPV)
+        vlc_state = request_playback_backend('vlc_experimental')
+        mpv_available, mpv_error = mpv_state.status == 'ready', mpv_state.error
+        vlc_available, vlc_error = vlc_state.status == 'ready', vlc_state.error
 
         grid_layout.addWidget(QLabel('Video training profile'), row, 0,
                               Qt.AlignmentFlag.AlignRight)
@@ -2451,8 +2453,8 @@ class SettingsDialog(QDialog):
             'MPV: Recommended primary backend for video workflows.\n'
             'Qt Hybrid: Compatibility fallback using Qt and OpenCV.\n'
             'VLC: Alternative experimental libVLC backend.\n\n'
-            f'MPV availability in current runtime: {"yes" if mpv_available else "no"}.\n'
-            f'VLC availability in current runtime: {"yes" if vlc_available else "no"}.\n'
+            f'MPV availability in current runtime: {"checking" if mpv_state.status == "pending" else "yes" if mpv_available else "no"}.\n'
+            f'VLC availability in current runtime: {"checking" if vlc_state.status == "pending" else "yes" if vlc_available else "no"}.\n'
             'When a selected backend is unavailable, TagGUI uses Qt Hybrid.\n'
             + (f'\nmpv load error: {mpv_error}' if (not mpv_available and mpv_error) else '')
             + (f'\nvlc load error: {vlc_error}' if (not vlc_available and vlc_error) else '')
@@ -2470,6 +2472,7 @@ class SettingsDialog(QDialog):
         self.video_playback_backend_combo.currentIndexChanged.connect(
             self._on_playback_backend_index_changed
         )
+        QTimer.singleShot(50, self, self._refresh_video_backend_availability)
         grid_layout.addWidget(self.video_playback_backend_combo, row, 1,
                               Qt.AlignmentFlag.AlignLeft)
         row += 1
@@ -2771,11 +2774,38 @@ class SettingsDialog(QDialog):
         self.warning_label.hide()
         self.warning_label.setStyleSheet('color: red;')
 
+    def _refresh_video_backend_availability(self):
+        """Refresh hints without waiting on a library import."""
+        tooltip = self.video_playback_backend_combo.toolTip().splitlines()
+        pending = False
+        for name, label in ((PLAYBACK_BACKEND_MPV, 'MPV'), ('vlc_experimental', 'VLC')):
+            state = request_playback_backend(name)
+            pending |= state.status == 'pending'
+            value = 'checking' if state.status == 'pending' else 'yes' if state.status == 'ready' else 'no'
+            prefix = f'{label} availability in current runtime:'
+            tooltip = [f'{prefix} {value}.' if line.startswith(prefix) else line for line in tooltip]
+            error_prefix = f'{label.lower()} load error:'
+            tooltip = [line for line in tooltip if not line.startswith(error_prefix)]
+            if state.error:
+                tooltip.append(f'{error_prefix} {state.error}')
+        self.video_playback_backend_combo.setToolTip('\n'.join(tooltip))
+        if pending:
+            QTimer.singleShot(50, self, self._refresh_video_backend_availability)
+
     @Slot(str)
     def _on_playback_backend_changed(self, backend_name: str):
         configured = normalize_playback_backend_name(backend_name)
+        state = request_playback_backend(configured)
+        if state.status == 'pending':
+            self.warning_label.setText(f'Preparing {playback_backend_display_name(configured)}...')
+            self.warning_label.show()
+            self.mpv_download_btn.hide()
+            QTimer.singleShot(50, self, lambda: (
+                self._on_playback_backend_changed(configured)
+                if self.video_playback_backend_combo.currentData() == configured else None))
+            return
         runtime_backend = resolve_runtime_playback_backend(configured)
-        backend_available, backend_error = get_playback_backend_status(configured)
+        backend_available, backend_error = state.status == 'ready', state.error
         show_mpv_download = (
             configured == PLAYBACK_BACKEND_MPV
             and not backend_available

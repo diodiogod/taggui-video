@@ -101,7 +101,10 @@ def test_generated_video_first_use_and_preview_paths(tmp_path):
             results[label] = {'handler_ms': (installed-begin)*1000,
                               'first_timer_ms': (ticks[0]-begin)*1000,
                               'capture_opened': player.cap is not None,
-                              'runtime_backend': player.runtime_playback_backend}
+                              'runtime_backend': player.runtime_playback_backend,
+                              'runtime_pending_at_first_timer': player._runtime_pending}
+            pump(lambda: not player._runtime_pending, seconds=30)
+            results[label]['runtime_ready_ms'] = (time.perf_counter()-begin)*1000
         results['first_load_top_self_costs'] = [
             {'file': key[0].rsplit('\\', 1)[-1], 'line': key[1], 'function': key[2],
              'calls': data[1], 'self_ms': round(data[2]*1000, 3),

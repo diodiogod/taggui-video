@@ -87,6 +87,23 @@ def coordinator_factory(monkeypatch):
         coordinator.deleteLater()
 
 
+@pytest.mark.parametrize('paused', [True, False])
+def test_runtime_pending_does_not_timeout_barrier_or_override_global_toggle(coordinator_factory, paused):
+    clicked = make_viewer(frame=100)
+    clicked.video_player._runtime_pending = True
+    coordinator = coordinator_factory([clicked])
+    coordinator.start(reference_viewer=clicked, paused=paused)
+    coordinator._barrier_start_monotonic = 0
+    coordinator._poll_barrier()
+    assert coordinator._state == coordinator._STATE_BARRIER
+    assert not clicked.video_player.play_frames
+    coordinator.set_paused(not paused)
+    clicked.video_player._runtime_pending = False
+    coordinator._pause_issued_monotonic = 0
+    coordinator._poll_barrier()
+    assert clicked.video_player.is_playing is paused
+
+
 def test_realign_uses_clicked_video_then_next_cycle_restarts_normally(coordinator_factory):
     other = make_viewer(frame=20)
     clicked = make_viewer(frame=100)

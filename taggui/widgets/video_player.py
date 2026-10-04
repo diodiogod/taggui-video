@@ -24,7 +24,6 @@ from utils.video.playback_backend import (
     PLAYBACK_BACKEND_QT_HYBRID,
     PLAYBACK_BACKEND_VLC_EXPERIMENTAL,
     get_configured_playback_backend,
-    resolve_runtime_playback_backend,
 )
 
 
@@ -299,6 +298,13 @@ class VideoPlayerWidget(QWidget):
         # Cross-thread signal: VLC position event fires on VLC thread, delivered on Qt main thread
         self._vlc_loop_end_crossed.connect(self._on_vlc_loop_end_crossed)
 
+        self._runtime_pending = False
+        self._runtime_prime_requested = False
+        self._runtime_play_requested = False
+        self._runtime_timer = QTimer(self)
+        self._runtime_timer.setInterval(20)
+        self._runtime_timer.timeout.connect(self._poll_runtime_ready)
+
         self._mpv_instance_generation = 0  # incremented on each new MPV instance
         self._mpv_load_generation = 0      # incremented on each loadfile call; filters stale events
         self._mpv_event_gen_box = None     # mutable list shared with event callback; [0] = current gen
@@ -327,7 +333,18 @@ class VideoPlayerWidget(QWidget):
         global mpv, vlc
 
         self.configured_playback_backend = get_configured_playback_backend()
-        self.runtime_playback_backend = resolve_runtime_playback_backend(self.configured_playback_backend)
+        selected = self.configured_playback_backend
+        software_gl = selected == PLAYBACK_BACKEND_MPV and os.getenv('QT_OPENGL', '').strip().lower() == 'software'
+        state = playback_backend.request_playback_backend(
+            PLAYBACK_BACKEND_QT_HYBRID if software_gl else selected)
+        self._runtime_pending = state.status == 'pending'
+        if self._runtime_pending:
+            self.runtime_playback_backend = selected
+            self._runtime_timer.start()
+            return False
+        self._runtime_timer.stop()
+        self.runtime_playback_backend = (PLAYBACK_BACKEND_QT_HYBRID
+            if software_gl or state.status == 'failed' else selected)
         mpv = playback_backend.MPV_PYTHON_MODULE
         vlc = playback_backend.VLC_PYTHON_MODULE
 
@@ -363,6 +380,23 @@ class VideoPlayerWidget(QWidget):
                 self._backend_fallback_warned = True
         else:
             self._backend_fallback_warned = False
+
+        return True
+
+    def _poll_runtime_ready(self):
+        if not self.video_path:
+            self._runtime_timer.stop()
+            self._runtime_play_requested = False
+            return
+        if not self._refresh_backend_selection():
+            return
+        if self._runtime_prime_requested:
+            self._runtime_prime_requested = False
+            self.prime_for_sync_startup()
+        if self._runtime_play_requested and self.is_playing:
+            self._runtime_play_requested = False
+            self.is_playing = False
+            self._play_ready(notify=False)
 
     def apply_mpv_hwdec_change(self):
         """Recreate an active MPV instance so a decoder change applies live."""
@@ -2585,10 +2619,9 @@ class VideoPlayerWidget(QWidget):
         video_dimensions: tuple[int, int] | None = None,
     ):
         """Load a video file."""
-        self._refresh_backend_selection()
-
         # Stop any previous playback quickly (avoid expensive frame extraction).
         self.suspend_for_media_switch()
+        self._refresh_backend_selection()
 
         # Reset corruption detection state
         self.consecutive_frame_failures = 0
@@ -2735,7 +2768,10 @@ class VideoPlayerWidget(QWidget):
 
     def prime_for_sync_startup(self) -> bool:
         """Pre-initialize forward playback state without starting visible playback."""
-        self._refresh_backend_selection()
+        if not self._refresh_backend_selection():
+            self._runtime_prime_requested = True
+            return False
+        self._runtime_prime_requested = False
         if not self.video_path:
             return False
         if self.playback_speed < 0:
@@ -2779,7 +2815,21 @@ class VideoPlayerWidget(QWidget):
 
     def play(self):
         """Start playback using QMediaPlayer (or OpenCV for negative speeds)."""
-        self._refresh_backend_selection()
+        if not self.video_path:
+            return
+        if not self._refresh_backend_selection():
+            self._runtime_play_requested = True
+            if not self.is_playing:
+                self.is_playing = True
+                self.playback_started.emit()
+            return
+        pending = self._runtime_play_requested
+        self._runtime_play_requested = False
+        if pending:
+            self.is_playing = False
+        self._play_ready(notify=not pending)
+
+    def _play_ready(self, *, notify=True):
         self._mpv_paused_seek_cover_active = False
         self._timeline_scrub_cover_reveal_pending = False
         self._clear_mpv_paused_seek_reveal_handler()
@@ -2804,7 +2854,8 @@ class VideoPlayerWidget(QWidget):
                 self.seek_to_frame(target_frame)
 
         self.is_playing = True
-        self.playback_started.emit()  # Notify that playback started
+        if notify:
+            self.playback_started.emit()  # Notify that playback started
 
         if self.playback_speed < 0:
             if not self._ensure_cap_ready():
@@ -3036,6 +3087,7 @@ class VideoPlayerWidget(QWidget):
 
     def pause(self):
         """Pause playback and show exact frame with OpenCV."""
+        self._runtime_play_requested = False
         if not self.is_playing and self._mpv_paused_seek_cover_active:
             # Repeated wall frame steps must keep the in-flight seek cover.
             # Revealing MPV here hides that cover; the following seek then
@@ -3071,6 +3123,11 @@ class VideoPlayerWidget(QWidget):
 
         if was_playing:
             self.playback_paused.emit()  # Notify that playback paused
+
+        if self._runtime_pending:
+            # Stop any previous native backend too (e.g. a preference change),
+            # but retain the preview instead of decoding a frame during import.
+            return
 
         if self._is_mpv_forward_active():
             # MPV was playing forward — just keep widget visible, already paused.
@@ -3166,6 +3223,10 @@ class VideoPlayerWidget(QWidget):
         This intentionally avoids OpenCV frame rendering/reset work so UI can
         show the target image immediately.
         """
+        self._runtime_timer.stop()
+        self._runtime_play_requested = False
+        self._runtime_pending = False
+        self._runtime_prime_requested = False
         was_playing = self.is_playing
         self.is_playing = False
         self._timeline_scrub_active = False
@@ -3981,6 +4042,10 @@ class VideoPlayerWidget(QWidget):
 
     def cleanup(self, *, force_gc: bool = True):
         """Release video resources."""
+        self._runtime_timer.stop()
+        self._runtime_play_requested = False
+        self._runtime_pending = False
+        self._runtime_prime_requested = False
         self._cancel_mpv_reveal()
         self._cancel_vlc_reveal()
         self.position_timer.stop()

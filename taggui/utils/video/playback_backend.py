@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import os
 from functools import lru_cache
+from .runtime_loader import RuntimeLoader, RuntimeState
 
 from utils.settings import DEFAULT_SETTINGS, settings
 from .mpv_runtime import bootstrap_mpv_runtime_search_paths
@@ -50,7 +51,7 @@ MPV_BACKEND_ERROR = ''
 VLC_PYTHON_MODULE = None
 VLC_BACKEND_AVAILABLE = False
 VLC_BACKEND_ERROR = ''
-_BACKEND_LOAD_ATTEMPTED: set[str] = set()
+_RUNTIME_LOADER = RuntimeLoader()
 
 
 MPV_HWDEC_CHOICES = ('automatic', 'disabled', 'nvdec-copy', 'd3d11va-copy')
@@ -99,43 +100,42 @@ def get_mpv_hwdec_mode() -> str:
     return 'nvdec-copy'
 
 
-def load_playback_backend(backend_name: str):
-    """Load an optional playback runtime only when it is requested."""
+def _publish_runtime_state(selected: str, state: RuntimeState):
+    """Publish only finished imports; pending is not an unavailable backend."""
     global MPV_PYTHON_MODULE, MPV_BACKEND_AVAILABLE, MPV_BACKEND_ERROR
     global VLC_PYTHON_MODULE, VLC_BACKEND_AVAILABLE, VLC_BACKEND_ERROR
+    if state.status not in ('ready', 'failed'):
+        return
+    if selected == PLAYBACK_BACKEND_MPV:
+        MPV_PYTHON_MODULE = state.module
+        MPV_BACKEND_AVAILABLE = state.status == 'ready'
+        MPV_BACKEND_ERROR = state.error
+    elif selected == PLAYBACK_BACKEND_VLC_EXPERIMENTAL:
+        VLC_PYTHON_MODULE = state.module
+        VLC_BACKEND_AVAILABLE = state.status == 'ready'
+        VLC_BACKEND_ERROR = state.error
 
+
+def request_playback_backend(backend_name: str) -> RuntimeState:
+    """Nonblocking preparation API; GUI integration must handle pending explicitly."""
     selected = normalize_playback_backend_name(backend_name)
-    if selected in _BACKEND_LOAD_ATTEMPTED:
-        if selected == PLAYBACK_BACKEND_MPV_EXPERIMENTAL:
-            return MPV_PYTHON_MODULE
-        if selected == PLAYBACK_BACKEND_VLC_EXPERIMENTAL:
-            return VLC_PYTHON_MODULE
+    module_name = {PLAYBACK_BACKEND_MPV: 'mpv', PLAYBACK_BACKEND_VLC_EXPERIMENTAL: 'vlc'}.get(selected)
+    if module_name is None:
+        return RuntimeState('ready')
+    state = _RUNTIME_LOADER.request(module_name)
+    _publish_runtime_state(selected, state)
+    return state
+
+
+def load_playback_backend(backend_name: str):
+    """Synchronous compatibility API; never interprets an in-flight import as failure."""
+    selected = normalize_playback_backend_name(backend_name)
+    module_name = {PLAYBACK_BACKEND_MPV: 'mpv', PLAYBACK_BACKEND_VLC_EXPERIMENTAL: 'vlc'}.get(selected)
+    if module_name is None:
         return None
-
-    _BACKEND_LOAD_ATTEMPTED.add(selected)
-    if selected == PLAYBACK_BACKEND_MPV_EXPERIMENTAL:
-        try:
-            import mpv as _mpv  # type: ignore
-            MPV_PYTHON_MODULE = _mpv
-            MPV_BACKEND_AVAILABLE = True
-            MPV_BACKEND_ERROR = ''
-        except Exception as e:
-            MPV_BACKEND_AVAILABLE = False
-            MPV_BACKEND_ERROR = f'{type(e).__name__}: {e}'
-        return MPV_PYTHON_MODULE
-
-    if selected == PLAYBACK_BACKEND_VLC_EXPERIMENTAL:
-        try:
-            import vlc as _vlc  # type: ignore
-            VLC_PYTHON_MODULE = _vlc
-            VLC_BACKEND_AVAILABLE = True
-            VLC_BACKEND_ERROR = ''
-        except Exception as e:
-            VLC_BACKEND_AVAILABLE = False
-            VLC_BACKEND_ERROR = f'{type(e).__name__}: {e}'
-        return VLC_PYTHON_MODULE
-
-    return None
+    state = _RUNTIME_LOADER.load(module_name)
+    _publish_runtime_state(selected, state)
+    return state.module
 
 
 def get_playback_backend_status(backend_name: str) -> tuple[bool, str]:

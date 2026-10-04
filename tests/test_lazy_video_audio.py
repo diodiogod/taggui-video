@@ -11,6 +11,7 @@ from shiboken6 import isValid
 from qt_test_helpers import APP, dispose_widget
 from widgets import video_player
 from widgets.video_player import VideoPlayerWidget
+from utils.video.runtime_loader import RuntimeState
 from utils.video.playback_backend import (
     PLAYBACK_BACKEND_MPV, PLAYBACK_BACKEND_VLC_EXPERIMENTAL,
 )
@@ -40,7 +41,8 @@ def test_external_preview_and_controls_do_not_open_qt_audio(player_scene, monkey
     player, _, item = player_scene
     assert player.audio_output is None
     assert player.media_player.audioOutput() is None
-    monkeypatch.setattr(video_player, 'resolve_runtime_playback_backend', lambda _: backend)
+    monkeypatch.setattr(video_player, 'get_configured_playback_backend', lambda: backend)
+    monkeypatch.setattr(video_player.playback_backend, 'request_playback_backend', lambda _: RuntimeState('ready'))
     def unexpected_audio(*args):
         pytest.fail('An external-backend preview opened a Qt audio device')
     monkeypatch.setattr(video_player, 'QAudioOutput', unexpected_audio)

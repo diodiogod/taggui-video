@@ -1,5 +1,21 @@
 # Performance implementation
 
+## Nonblocking first-video runtime integration — 2026-10-03
+
+`VideoPlayerWidget._refresh_backend_selection` now requests the shared import without waiting. `load_video` can install its cached preview while the runtime is pending. A parent-owned timer accepts readiness on the GUI thread; `play` remembers current intent, `pause` cancels it while also stopping any previous native backend, and media switching/cleanup cancels continuation. Completion calls the existing native playback path only for the current request and avoids duplicate playback-start signals. Qt fallback occurs after actual import failure, not while pending. Native player/GL creation and reveal timing remain unchanged; absent metadata/preview may still require synchronous capture.
+
+`prime_for_sync_startup` retains pending preparation without starting playback; `VideoSyncCoordinator` keeps pending imports inside the barrier, preserving its independent global pause intent rather than treating loading as a seek timeout. Settings runtime checks now poll readiness with native-context callbacks, discard stale selection updates and retain error details.
+
+Generated 1920x1080 cached-preview probe: handler **7.768 ms**, first GUI timer **23.135 ms** while import was still pending, readiness **51.409 ms**. Previous warm synchronous samples were approximately 46–48 ms handlers and 59–63 ms first timers. These are individual warm-process-state samples, not matched medians, cold-load guarantees or native first-frame latency. Cold DLL work is moved off the GUI, not shortened. A genuinely hung import cannot safely be interrupted; normal process shutdown waits for import threads.
+
+Tests cover pending preview/event delivery, both initial playback intents and toggles, abandoned selections/stills/cleanup, import failure, completion before polling, deferred priming, sync-barrier global toggles and Settings closure/selection changes. Full suite: **595 passed, four skipped** before the final native-pause edge correction; **39 focused tests passed** after it, including its new regression. Earlier startup restoration tests remain in the complete suite. Manual check: fresh launch and first video, immediate switch or pause while loading, mute/volume, multi-video global play/pause and native first-frame/audio behavior. This batch remains uncommitted/unpushed.
+
+## Shared optional-runtime loading foundation — 2026-10-03
+
+`utils/video/runtime_loader.py` provides single-flight imports with immutable unrequested/pending/ready/failed snapshots. `playback_backend.py` uses it for existing synchronous loading and exposes a nonblocking request API. Unlike the old early attempted flag, concurrent requests cannot interpret an unfinished import as a failed backend. Completed errors are cached, and import failure always releases synchronous waiters. Worker imports own no settings or Qt objects; non-daemon workers finish before ordinary interpreter shutdown.
+
+UI consumers remain synchronous in this checkpoint: no video responsiveness improvement is claimed yet. Pending-aware selection/play continuation, settings status and sync-start handling must be implemented together before enabling background requests in the UI. Focused loader/startup/audio suite: 25 passed. Warm native import through the loader: 31.491 ms with six GUI timer deliveries, longest gap 5.362 ms. New work is uncommitted.
+
 ## Startup restoration regression correction — 2026-10-03
 
 The new closing guard read `_main_window_closing` before its first assignment in closeEvent, interrupting startup restoration. Initialize it to false alongside the constructor's lifecycle state. The native-lifetime test now waits for queued startup delivery and exercises real `restore()` against isolated saved folder/dock state, asserting folder-load dispatch and dock placement as well as workspace restoration. Both normal startup and close-before-startup pass. Previous teardown-only coverage failed to prove restoration ran. Real user settings were not edited; closing an affected build could have persisted the default layout.

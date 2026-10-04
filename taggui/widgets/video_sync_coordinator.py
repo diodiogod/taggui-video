@@ -242,6 +242,8 @@ class _PlayerEntry:
     def is_ready(self, target_frame: int | None = None) -> bool:
         """Check pause state and, for realignment, that the target seek settled."""
         player = self.player
+        if bool(getattr(player, '_runtime_pending', False)):
+            return False
         if bool(getattr(player, 'is_playing', False)):
             return False
         if target_frame is not None and player.mpv_player is not None:
@@ -563,6 +565,10 @@ class VideoSyncCoordinator(QObject):
 
     @Slot()
     def _poll_barrier(self):
+        if any(bool(getattr(e.player, '_runtime_pending', False)) for e in self._entries):
+            # Loading is not a seek timeout; retain the coordinator's play intent.
+            self._barrier_start_monotonic = time.monotonic()
+            return
         timed_out = (time.monotonic() - self._barrier_start_monotonic) * 1000.0 >= _MAX_BARRIER_MS
         settled = (time.monotonic() - self._pause_issued_monotonic) * 1000.0 >= _MIN_SETTLE_MS
         targets = self._barrier_frame_targets
