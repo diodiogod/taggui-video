@@ -9,6 +9,16 @@
 - Startup does less repeated setup, and window cleanup is safer.
 - First-video previews can appear while the playback library prepares in the background.
 
+## Remaining startup styling investigation — 2026-10-03
+
+- **Area/files/functions:** `AutoCaptioner.__init__`, `set_layout_mode`, `_apply_layout_style`; existing isolated full-window profiler and new `tests/probe_caption_startup.py`.
+- **Question:** Can inherited styling avoid repeated startup polishing without delaying panels or altering layout restoration? Prior primary source: [Qt styling approaches](https://doc.qt.io/qt-6/qtwidgets-styling-approaches.html), which explains descendant repolishing on stylesheet updates. Current profile still attributes about 45.9 ms of stylesheet self-time to Auto-Captioner.
+- **Technique/experiment:** Compare checkpoint 746a3ce layout/style methods with current methods under Fusion, one warmup and five alternating-order construction samples. Exercise compact/classic/compact transitions and compare rendered QImages exactly. Use isolated settings and explicit native widget disposal.
+- **Rejected variant 1:** Applying root and container styling before attaching populated controls changed rendered compact output. Restoring production behavior made exact rendering comparisons pass. Do not trade UI parity for an unproven startup gain.
+- **Rejected variant 2:** Install only the container stylesheet early and avoid redundant identical assignments. Render parity passed but construction medians were 75.328 ms baseline versus 75.787 ms candidate: no improvement. An earlier comparison accidentally shared the modified style method in both variants; the corrected comparison extracts both baseline layout/style methods. The candidate was removed.
+- **Mapping/benefit/confidence/effort/risk:** No retained application change or demonstrated speedup. High confidence in the measured lack of benefit for this candidate, small experiment effort. Whole-panel lazy construction remains medium-to-high integration risk because callers expect existing controls and saved dock restoration must continue to work; this isolated result does not justify it.
+- **Decision:** Both styling shortcuts rejected. Keep the checkpoint comparison probe for future startup candidates. Further lazy construction needs a concrete measured panel boundary, lifecycle/field-access plan, saved-layout parity and first-open timing before implementation. No new GUI test is required for these discarded changes.
+
 This diary records research findings and implementation measurements. See [the implementation log](PERFORMANCE_IMPLEMENTATION_LOG.md) for delivery status and operational history. The earlier phases describe the original audit baseline.
 
 ## First-video audio attribution and deferred setup — 2026-10-03

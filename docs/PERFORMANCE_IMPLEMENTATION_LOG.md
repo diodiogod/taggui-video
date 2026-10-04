@@ -1,5 +1,9 @@
 # Performance implementation
 
+## Further startup evaluation — 2026-10-03
+
+Two Auto-Captioner styling experiments were discarded: moving all styling early changed rendered layout; moving only container styling early preserved pixels but did not improve measured construction (75.328 vs 75.787 ms medians). Production code remains at checkpoint 746a3ce. Added an opt-in isolated checkpoint/render comparison probe and recorded the rejected ideas. Broader lazy panels remain measurement/design work, not an approved performance claim.
+
 ## Nonblocking first-video runtime integration — 2026-10-03
 
 `VideoPlayerWidget._refresh_backend_selection` now requests the shared import without waiting. `load_video` can install its cached preview while the runtime is pending. A parent-owned timer accepts readiness on the GUI thread; `play` remembers current intent, `pause` cancels it while also stopping any previous native backend, and media switching/cleanup cancels continuation. Completion calls the existing native playback path only for the current request and avoids duplicate playback-start signals. Qt fallback occurs after actual import failure, not while pending. Native player/GL creation and reveal timing remain unchanged; absent metadata/preview may still require synchronous capture.
