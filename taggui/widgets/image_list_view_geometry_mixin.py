@@ -2527,7 +2527,7 @@ class ImageListViewGeometryMixin:
             jump_until = float(getattr(self, "_last_explicit_jump_until", 0.0) or 0.0)
             jump_target = getattr(self, "_last_explicit_jump_target_global", None)
             exact_jump_active = (
-                jump_kind == "index_input"
+                jump_kind in {"index_input", "delete_restore"}
                 and time.time() < jump_until
                 and isinstance(jump_target, int)
                 and int(jump_target) == int(global_idx)

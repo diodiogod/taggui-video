@@ -612,9 +612,11 @@ class MasonryCompletionService:
                                 "index_input",
                                 "sort_restore",
                                 "startup_restore",
+                                "delete_restore",
                             } or stabilize_reason in {
                                 "sort_restore",
                                 "startup_restore",
+                                "delete_restore",
                             }
                             current_signal = getattr(v, "_last_masonry_signal", None)
                             force_center_anchor = current_signal in {

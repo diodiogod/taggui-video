@@ -348,26 +348,27 @@ class ImageListViewFileOpsMixin:
                     f'{pluralize("image", selected_image_count)} and '
                     f'{"its" if selected_image_count == 1 else "their"} '
                     f'{pluralize("caption", selected_image_count)}?')
+        source_model = self.proxy_image_list_model.sourceModel()
+        paginated = bool(getattr(source_model, '_paginated_mode', False))
+        total_rows = (source_model._total_count if paginated
+                      else self.proxy_image_list_model.rowCount())
+        # Proxy rows cover only resident pages. Capture positions in the full
+        # displayed order before files or model mappings change.
+        selected_rows_by_path = {}
+        for index in self.get_selected_proxy_indices():
+            image = index.data(Qt.ItemDataRole.UserRole)
+            if image is None:
+                continue
+            row = (source_model.get_global_index_for_row(
+                self.proxy_image_list_model.mapToSource(index).row())
+                if paginated else index.row())
+            if row >= 0:
+                selected_rows_by_path[image.path] = row
+
         reply = get_confirmation_dialog_reply(title, question)
         if reply != QMessageBox.StandardButton.Yes:
             return
-
         main_window = self._main_window_host()
-
-        # Calculate the index to focus after deletion
-        # Get all selected indices and find the maximum (last in sort order)
-        selected_indices = sorted([idx.row() for idx in self.selectedIndexes()])
-        if selected_indices:
-            max_selected_row = selected_indices[-1]
-            total_rows = self.proxy_image_list_model.rowCount()
-            # Set next index: use the row after the last deleted one, or the one before if it's the last
-            next_index = max_selected_row + 1 - len(selected_indices)
-            if next_index >= total_rows - len(selected_indices):
-                # If we're deleting at the end, focus on the image before the first deleted one
-                next_index = max(0, selected_indices[0] - 1)
-            # Store in main window for use after reload
-            if main_window is not None:
-                main_window.post_deletion_index = next_index
 
         # Release matching videos from the main, floating, and comparison viewers.
         target_video_paths = {
@@ -452,20 +453,35 @@ class ImageListViewFileOpsMixin:
         if not deleted_paths:
             return
 
+        deleted_rows = sorted({selected_rows_by_path[path] for path in deleted_paths
+                               if path in selected_rows_by_path})
+        next_index = (max(0, min(deleted_rows[-1] + 1 - len(deleted_rows),
+                                 total_rows - len(deleted_rows) - 1))
+                      if deleted_rows else 0)
+
+        def reload_after_deletion():
+            if main_window is not None:
+                main_window.post_deletion_index = next_index
+            self.directory_reload_requested.emit()
+
         removed_count = 0
         try:
-            _src_model = self.proxy_image_list_model.sourceModel()
-            removed_count = int(_src_model.remove_generated_media_batch(deleted_paths) or 0)
+            options = {'next_global_index': next_index} if paginated else {}
+            removed_count = int(source_model.remove_generated_media_batch(deleted_paths, **options) or 0)
         except Exception as e:
             print(f"[DELETE] Warning: failed to clean model/DB index: {e}")
-            self.directory_reload_requested.emit()
+            reload_after_deletion()
             return
 
         if removed_count <= 0:
-            self.directory_reload_requested.emit()
+            reload_after_deletion()
             return
 
-        if selected_indices:
+        if paginated:
+            # ordered_view_ready restores selection and viewport after reset.
+            return
+
+        if deleted_rows:
             target_row = min(next_index, max(0, self.proxy_image_list_model.rowCount() - 1))
             if self.proxy_image_list_model.rowCount() > 0:
                 proxy_index = self.proxy_image_list_model.index(target_row, 0)

@@ -629,7 +629,7 @@ class ImageListViewStrategyMixin:
             jump_until = float(getattr(self, "_last_explicit_jump_until", 0.0) or 0.0)
             jump_target = getattr(self, "_last_explicit_jump_target_global", None)
             if (
-                jump_kind == "index_input"
+                jump_kind in {"index_input", "delete_restore"}
                 and now <= jump_until
                 and isinstance(jump_target, int)
                 and jump_target >= 0
@@ -1526,13 +1526,13 @@ class ImageListViewStrategyMixin:
                 if isinstance(post_jump_state, dict)
                 else ""
             )
-            if stabilize_reason in {"sort_restore", "startup_restore"}:
+            if stabilize_reason in {"sort_restore", "startup_restore", "delete_restore"}:
                 prefer_exact_item_anchor = True
             jump_kind = getattr(self, "_last_explicit_jump_kind", None)
             jump_until = float(getattr(self, "_last_explicit_jump_until", 0.0) or 0.0)
             jump_target = getattr(self, "_last_explicit_jump_target_global", None)
             if (
-                jump_kind == "index_input"
+                jump_kind in {"index_input", "delete_restore"}
                 and now <= jump_until
                 and isinstance(jump_target, int)
                 and int(jump_target) == int(target_global)

@@ -1681,14 +1681,18 @@ class ImageList(QDockWidget):
         dialog.open()
 
     def _on_ordered_view_ready(self, result):
-        if result['request']['reason'] != 'sort':
+        reason = result['request']['reason']
+        if reason not in ('sort', 'delete'):
             return
-        if not result['request']['restore_selection'] or result['request']['selected_path'] is None:
+        if (result['total'] <= 0 or (reason == 'sort' and (
+                not result['request']['restore_selection']
+                or result['request']['selected_path'] is None))):
             self._image_to_scroll_to = None
             self._sort_restore_target_global = None
             self.list_view.verticalScrollBar().setValue(0)
             return
         source = self.proxy_image_list_model.sourceModel()
+        self._sort_restore_reason = 'delete_restore' if reason == 'delete' else 'sort_restore'
         self._sort_restore_target_global = result['target']
         self._arm_sort_restore_anchor(source, result['target'])
         try:
@@ -1733,7 +1737,9 @@ class ImageList(QDockWidget):
             _t.time() + 4.0,
         )
 
-    def _start_sort_restore_to_global(self, source_model, target_global: int) -> bool:
+    def _start_sort_restore_to_global(
+        self, source_model, target_global: int, *, reason: str = 'sort_restore',
+    ) -> bool:
         """Route sort restore through the shared relocation pipeline."""
         if not (
             source_model
@@ -1754,7 +1760,7 @@ class ImageList(QDockWidget):
                 return bool(
                     self.list_view.start_targeted_relocation(
                         int(target_global),
-                        reason='sort_restore',
+                        reason=reason,
                         source_model=source_model,
                     )
                 )
@@ -1768,6 +1774,8 @@ class ImageList(QDockWidget):
         target_global_override = getattr(self, '_reaction_sort_selection_global_override', None)
         has_global_override = isinstance(target_global_override, int) and target_global_override >= 0
         sort_restore_target = getattr(self, '_sort_restore_target_global', None)
+        restore_reason = getattr(self, '_sort_restore_reason', 'sort_restore')
+        self._sort_restore_reason = 'sort_restore'
         has_sort_restore_target = isinstance(sort_restore_target, int) and sort_restore_target >= 0
         if not hasattr(self, '_image_to_scroll_to') or not self._image_to_scroll_to:
             if not has_global_override and not has_sort_restore_target:
@@ -1802,7 +1810,8 @@ class ImageList(QDockWidget):
             new_proxy_index = QModelIndex()
             
             if has_sort_restore_target and hasattr(source_model, '_paginated_mode') and source_model._paginated_mode:
-                if self._start_sort_restore_to_global(source_model, int(sort_restore_target)):
+                if self._start_sort_restore_to_global(
+                        source_model, int(sort_restore_target), reason=restore_reason):
                     return
                 local_row = (
                     source_model.get_loaded_row_for_global_index(int(sort_restore_target))

@@ -443,7 +443,7 @@ class ImageListViewInteractionMixin:
             except Exception:
                 pass
 
-        if reason in {"startup_restore", "page_drag", "index_input"}:
+        if reason in {"startup_restore", "page_drag", "index_input", "delete_restore"}:
             try:
                 loaded_row = -1
                 if hasattr(source_model, "get_loaded_row_for_global_index"):
@@ -682,7 +682,7 @@ class ImageListViewInteractionMixin:
 
         # Commit selection once, after the target geometry is ready. Selecting
         # here synchronously loads the viewer inside the jump input handler.
-        if reason not in {"startup_restore", "page_drag", "index_input"} and proxy_idx.isValid():
+        if reason not in {"startup_restore", "page_drag", "index_input", "delete_restore"} and proxy_idx.isValid():
             self.set_current_index_preserving_virtual_selection(proxy_idx)
 
         mw = self._main_window_host()
@@ -2946,11 +2946,12 @@ class ImageListViewInteractionMixin:
             and hasattr(self, "_use_local_anchor_masonry")
             and self._use_local_anchor_masonry(source_model)
         )
-        prefer_forward_window = jump_kind in {"sort_restore", "startup_restore"}
+        prefer_forward_window = jump_kind in {"sort_restore", "startup_restore", "delete_restore"}
 
         if strict_paginated_masonry and jump_kind in {
             "sort_restore",
             "startup_restore",
+            "delete_restore",
             "page_drag",
             "index_input",
             "page_input",

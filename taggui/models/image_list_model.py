@@ -3716,12 +3716,13 @@ class ImageListModel(QAbstractListModel):
 
     def prepare_ordered_view(self, *, reason='refresh', selected_path=None, previous_query=None,
                              stale_paths=(), previous_text=None, previous_order=None,
-                             restore_selection=True, refresh_scope=False):
+                             restore_selection=True, refresh_scope=False, target_global=None):
         """Prepare count/rank/target records off-thread and accept one owned view."""
         if not self._paginated_mode or not self._db or self._shutdown_requested:
             return
         selection = self._capture_selected_image_paths()
-        if restore_selection and selected_path is None and reason != 'filter':
+        if (restore_selection and selected_path is None and target_global is None
+                and reason != 'filter'):
             selected_path = selection[0]
         pending = self._view_prepare_owner
         if pending is not None and pending['previous_query'] is not None:
@@ -3746,8 +3747,9 @@ class ImageListModel(QAbstractListModel):
                         previous_text=previous_text,
                         previous_order=previous_order, restore_selection=restore_selection,
                         stale_paths=tuple(stale_paths),
-                        resident_pages=tuple(sorted(self._pages)) if reason in ('metadata','refresh') else (),
-                        target_hint=fallback_page*self.PAGE_SIZE if reason != 'filter' else 0,
+                        resident_pages=tuple(sorted(self._pages)) if reason in ('metadata','refresh','delete') else (),
+                        target_hint=(max(0, int(target_global)) if target_global is not None
+                                     else fallback_page*self.PAGE_SIZE if reason != 'filter' else 0),
                         scope_options=scope_options,
                         validation_generation=self._path_validation_generation,
                         media_sql=self._media_type_sql, text_sql=self._text_filter_sql,
@@ -11790,7 +11792,9 @@ class ImageListModel(QAbstractListModel):
         )
         return len(inserted_paths)
 
-    def remove_generated_media_batch(self, image_paths: list[Path]) -> int:
+    def remove_generated_media_batch(
+        self, image_paths: list[Path], *, next_global_index: int | None = None,
+    ) -> int:
         """Remove multiple known media files from the model and DB without reloading the folder."""
         resolved_paths: list[Path] = []
         seen_paths: set[Path] = set()
@@ -11867,6 +11871,14 @@ class ImageListModel(QAbstractListModel):
         removed_count = int(self._db.remove_images_by_paths(rel_paths) or 0)
         if removed_count <= 0:
             return 0
+
+        if next_global_index is not None:
+            # The deleted path cannot be restored by rank. Prepare its successor
+            # and let the browser select it only after the new pages are installed.
+            self.prepare_ordered_view(
+                reason='delete', target_global=next_global_index, restore_selection=False,
+            )
+            return removed_count
 
         new_total = int(self._db.count(
             filter_sql=self._filter_sql,
