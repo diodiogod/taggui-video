@@ -179,6 +179,8 @@ class VideoPlayerWidget(QWidget):
 
         # Playback state
         self.is_playing = False
+        self._play_intent_generation = 0
+        self._decoder_restart_pending = False
         self.current_frame = 0
         self.playback_speed = 1.0
         self._display_fit_mode = VIDEO_DISPLAY_FIT_PRESERVE
@@ -217,6 +219,7 @@ class VideoPlayerWidget(QWidget):
         self.mpv_geometry_timer.setInterval(100)
         self.mpv_geometry_timer.timeout.connect(self._update_mpv_geometry_from_pixmap)
         self._mpv_pending_reveal = False
+        self._mpv_reveal_generation = 0
         self._mpv_reveal_deadline_monotonic = 0.0
         self._mpv_reveal_timer = QTimer(self)
         self._mpv_reveal_timer.setInterval(16)
@@ -402,13 +405,27 @@ class VideoPlayerWidget(QWidget):
         """Recreate an active MPV instance so a decoder change applies live."""
         if self.mpv_player is None:
             return
+        if self.playback_speed < 0:
+            # Reverse playback uses OpenCV; changing MPV's next decoder must
+            # not stop its independent frame timer or change user intent.
+            self._teardown_mpv(drop_player=True)
+            return
         resume_playback = bool(self.is_playing and self.playback_speed >= 0)
-        self.is_playing = False
+        self._decoder_restart_pending = resume_playback
+        self._play_intent_generation += 1
+        restart_generation = self._play_intent_generation
+        restart_path = self.video_path
         self.position_timer.stop()
         self._teardown_mpv(drop_player=True)
         self._active_forward_backend = PLAYBACK_BACKEND_QT_HYBRID
         if resume_playback and self.video_path:
-            QTimer.singleShot(0, self.play)
+            def resume_if_current():
+                if (self._play_intent_generation != restart_generation
+                        or self.video_path != restart_path or not self.is_playing):
+                    return
+                self.is_playing = False
+                self.play()
+            QTimer.singleShot(0, self, resume_if_current)
 
     def _log_loop_debug(self, message: str, force: bool = False):
         """Loop debug logging intentionally disabled for normal runtime."""
@@ -1743,17 +1760,10 @@ class VideoPlayerWidget(QWidget):
         return max(views, key=_score)
 
     def _cancel_mpv_reveal(self):
-        self._mpv_pending_reveal = True
+        self._mpv_reveal_generation += 1
+        self._mpv_pending_reveal = False
         self._mpv_reveal_deadline_monotonic = 0.0
         self._mpv_reveal_timer.stop()
-
-        def _finalize_reveal():
-            self._mpv_pending_reveal = False
-            if self.is_playing and self._is_mpv_forward_active():
-                # Anchor playback clock when the first frame is actually visible.
-                self._mpv_play_base_position_ms = float(self._mpv_estimated_position_ms or 0.0)
-                self._mpv_play_started_monotonic = time.monotonic()
-            self._set_mpv_visible(True)
         gl_widget = getattr(self, 'mpv_widget', None)
         if isinstance(gl_widget, MpvGlWidget):
             gl_widget._emit_frame_painted = False
@@ -2046,11 +2056,15 @@ class VideoPlayerWidget(QWidget):
         video's first frame — eliminating the flash of the previous video's
         last frame that occurred when revealing immediately.
         """
+        self._cancel_mpv_reveal()
+        generation = self._mpv_reveal_generation
         self._mpv_pending_reveal = True
         self._mpv_reveal_deadline_monotonic = 0.0
         self._mpv_reveal_timer.stop()
 
         def _finalize_reveal():
+            if generation != self._mpv_reveal_generation or not self._mpv_pending_reveal:
+                return
             self._mpv_pending_reveal = False
             if self.is_playing and self._is_mpv_forward_active():
                 # Anchor playback clock when the first frame is actually visible.
@@ -2080,7 +2094,7 @@ class VideoPlayerWidget(QWidget):
         # start showing the widget after the requested delay so frame_painted
         # can arrive, but keep startup gate active until a real frame is painted.
         def _reveal_timeout():
-            if not self._mpv_pending_reveal:
+            if generation != self._mpv_reveal_generation or not self._mpv_pending_reveal:
                 return
             if not gl_widget._emit_frame_painted:
                 return  # already revealed via frame_painted
@@ -2093,7 +2107,7 @@ class VideoPlayerWidget(QWidget):
 
             # Hard fallback: if first-frame signal still doesn't arrive, unstick.
             def _force_finalize_without_first_frame():
-                if not self._mpv_pending_reveal:
+                if generation != self._mpv_reveal_generation or not self._mpv_pending_reveal:
                     return
                 gl_widget._emit_frame_painted = False
                 try:
@@ -2102,10 +2116,10 @@ class VideoPlayerWidget(QWidget):
                     pass
                 _finalize_reveal()
 
-            QTimer.singleShot(2000, _force_finalize_without_first_frame)
+            QTimer.singleShot(2000, self, _force_finalize_without_first_frame)
 
         fallback_ms = max(40, int(delay_ms))
-        QTimer.singleShot(fallback_ms, _reveal_timeout)
+        QTimer.singleShot(fallback_ms, self, _reveal_timeout)
 
     def _try_reveal_mpv_surface(self):
         if not self._mpv_pending_reveal:
@@ -2815,6 +2829,10 @@ class VideoPlayerWidget(QWidget):
 
     def play(self):
         """Start playback using QMediaPlayer (or OpenCV for negative speeds)."""
+        self._play_intent_generation += 1
+        if self._decoder_restart_pending:
+            self._decoder_restart_pending = False
+            self.is_playing = False
         if not self.video_path:
             return
         if not self._refresh_backend_selection():
@@ -3087,6 +3105,8 @@ class VideoPlayerWidget(QWidget):
 
     def pause(self):
         """Pause playback and show exact frame with OpenCV."""
+        self._play_intent_generation += 1
+        self._decoder_restart_pending = False
         self._runtime_play_requested = False
         if not self.is_playing and self._mpv_paused_seek_cover_active:
             # Repeated wall frame steps must keep the in-flight seek cover.
@@ -3223,6 +3243,8 @@ class VideoPlayerWidget(QWidget):
         This intentionally avoids OpenCV frame rendering/reset work so UI can
         show the target image immediately.
         """
+        self._play_intent_generation += 1
+        self._decoder_restart_pending = False
         self._runtime_timer.stop()
         self._runtime_play_requested = False
         self._runtime_pending = False
@@ -4042,6 +4064,8 @@ class VideoPlayerWidget(QWidget):
 
     def cleanup(self, *, force_gc: bool = True):
         """Release video resources."""
+        self._play_intent_generation += 1
+        self._decoder_restart_pending = False
         self._runtime_timer.stop()
         self._runtime_play_requested = False
         self._runtime_pending = False

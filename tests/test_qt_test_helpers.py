@@ -1,8 +1,9 @@
 from PySide6.QtWidgets import QWidget
-from PySide6.QtCore import QTimer
+from PySide6.QtCore import QTimer, QSortFilterProxyModel, QItemSelectionModel
+from PySide6.QtGui import QStandardItemModel
 from shiboken6 import isValid
 
-from qt_test_helpers import APP, dispose_widget, pump
+from qt_test_helpers import APP, dispose_widget, dispose_qobject, pump
 
 
 def test_dispose_widget_destroys_native_children_before_returning():
@@ -28,3 +29,26 @@ def test_context_bound_queued_callback_runs_only_while_native_owner_lives():
     dispose_widget(widget)
     APP.processEvents()
     assert delivered == ['alive']
+
+
+def test_dispose_models_completes_native_deletion_with_sibling_consumer_alive():
+    source = QStandardItemModel()
+    proxy = QSortFilterProxyModel()
+    proxy.setSourceModel(source)
+    selection = QItemSelectionModel(proxy)
+    sibling = QSortFilterProxyModel()
+    sibling.setSourceModel(source)
+    delivered = []
+    QTimer.singleShot(0, source, lambda: delivered.append(True))
+    try:
+        dispose_qobject(selection)
+        dispose_qobject(proxy)
+        assert not isValid(selection) and not isValid(proxy)
+        assert isValid(source) and sibling.sourceModel() is source
+        dispose_qobject(source)
+        assert not isValid(source)
+        assert isValid(sibling) and sibling.sourceModel() is None
+        APP.processEvents()
+        assert delivered == []
+    finally:
+        dispose_qobject(sibling)

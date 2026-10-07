@@ -13,8 +13,9 @@ from qt_test_helpers import APP, dispose_widget
 from utils.settings import settings
 
 
-@pytest.mark.parametrize('deliver_startup', [False, True])
-def test_window_can_be_destroyed_before_or_after_startup_delivery(monkeypatch, tmp_path, deliver_startup):
+@pytest.mark.parametrize('deliver_startup, delayed_folder',
+                         [(False, False), (True, False), (True, True), (True, 'superseded')])
+def test_window_can_be_destroyed_before_or_after_startup_delivery(monkeypatch, tmp_path, deliver_startup, delayed_folder):
     monkeypatch.setenv('TAGGUI_FORCE_CLEAN_EXIT_ON_CLOSE', '0')
     errors = []
     monkeypatch.setattr(sys, 'excepthook', lambda *error: errors.append(error))
@@ -25,7 +26,7 @@ def test_window_can_be_destroyed_before_or_after_startup_delivery(monkeypatch, t
         original_restore(self)
         restored.append('session')
     monkeypatch.setattr(MainWindow, 'restore', restore_session)
-    monkeypatch.setenv('TAGGUI_PRIMARY_RESTORE_DELAY_MS', '0')
+    monkeypatch.setenv('TAGGUI_PRIMARY_RESTORE_DELAY_MS', '250' if delayed_folder else '0')
     settings.setValue('directory_path', str(tmp_path))
     settings.setValue('secondary_browser_restore_on_startup', False)
     settings.setValue('secondary_browser_visible', False)
@@ -51,12 +52,19 @@ def test_window_can_be_destroyed_before_or_after_startup_delivery(monkeypatch, t
             QTest.qWait(50)
             APP.processEvents()
             assert restored == ['session', 'workspace']
-            assert loaded == [tmp_path]
+            assert loaded == ([] if delayed_folder else [tmp_path])
             assert window.dockWidgetArea(window.image_list) == Qt.DockWidgetArea.RightDockWidgetArea
             assert window._main_window_closing is False
+            if delayed_folder == 'superseded':
+                # load_directory increments this before dispatching new work.
+                window._load_session_id += 1
+                QTest.qWait(300)
+                assert loaded == [], 'Saved folder superseded a newer load request'
         window.pipeline_editor.step_list.schedule_link_connector_refresh()
     finally:
         window.close()
+        if delayed_folder:
+            QTest.qWait(300)
         for task in tasks:
             task.drain()
         executor.shutdown(wait=True, cancel_futures=True)
@@ -65,6 +73,8 @@ def test_window_can_be_destroyed_before_or_after_startup_delivery(monkeypatch, t
             APP.processEvents()
         QTest.qWait(100)
     assert not isValid(window)
+    if delayed_folder:
+        assert loaded == [], 'Folder restoration ran after the window closed'
     assert restored == (['session', 'workspace'] if deliver_startup else [])
     assert isValid(shared) and APP.style() is shared
     assert model is proxy.sourceModel()

@@ -110,10 +110,9 @@ class FloatingReviewSlotsOverlay(QWidget):
 
     def _current_review_state(self) -> tuple[int, int]:
         try:
-            index = getattr(self._viewer, 'proxy_image_index', None)
-            if index is None or not index.isValid():
-                return 0, 0
-            image = index.data(Qt.ItemDataRole.UserRole)
+            # A browser reset invalidates its indices while the wall video
+            # keeps playing. The viewer owns that displayed clip's metadata.
+            image = getattr(self._viewer, 'current_media', None)
             if image is None:
                 return 0, 0
             review_rank = int(getattr(image, 'review_rank', 0) or 0)

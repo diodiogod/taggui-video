@@ -61,6 +61,7 @@ class SecondaryBrowser(QObject):
         settings_prefix: str = '',
     ):
         super().__init__(parent)
+        self.directory_load_generation = 0
         self._settings_prefix = str(settings_prefix or '')
 
         tag_sep = tag_separator or get_tag_separator()
@@ -395,6 +396,7 @@ class SecondaryBrowser(QObject):
     # ─────────────────────────────────────────────────────────────────────────
 
     def load_directory(self, path: Path, load_options: LimitedLoadOptions | None = None):
+        self.directory_load_generation += 1
         resolved = path.resolve()
         settings.setValue(self._settings_key('directory_path'), str(resolved))
         parent = self.parent()

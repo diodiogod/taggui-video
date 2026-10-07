@@ -3542,7 +3542,7 @@ class MainWindow(QMainWindow):
 
     def _current_viewer_image(self, viewer: ImageViewer | None = None):
         target = viewer or self.get_active_viewer()
-        if target is None:
+        if target is None or getattr(target, '_viewer_model_resetting', False):
             return None
         # Prefer the stable Python object captured when the media was loaded.
         # Dereferencing QPersistentModelIndex.data() during a modal focus event
@@ -3960,11 +3960,9 @@ class MainWindow(QMainWindow):
         return list(self._rating_reaction_target_context().get('images') or [])
 
     def _review_target_images(self) -> list[Image]:
-        active_viewer = self.get_active_viewer()
-        if bool(getattr(active_viewer, '_selection_masonry_wall_viewer', False)):
-            image = self._current_viewer_image(active_viewer)
-            return [image] if image is not None else []
-        return self._rating_reaction_target_images()
+        # Toggle decisions and persistence must resolve the same owner, even
+        # when hover changed the active viewer since the last explicit click.
+        return list(self._review_target_context().get('images') or [])
 
     def _review_target_context(self) -> dict:
         """Resolve target context for review badge actions."""
@@ -4109,13 +4107,13 @@ class MainWindow(QMainWindow):
     def _apply_review_rank_from_viewer(self, viewer: ImageViewer | None, rank: int):
         if viewer is None:
             return
-        self.set_active_viewer(viewer)
+        self._activate_floating_action_target(viewer)
         self._toggle_current_review_rank(rank)
 
     def _apply_review_flag_from_viewer(self, viewer: ImageViewer | None, flag_name: str):
         if viewer is None:
             return
-        self.set_active_viewer(viewer)
+        self._activate_floating_action_target(viewer)
         self._toggle_current_review_flag(flag_name)
 
     def _set_rating_controls_value(self, rating: float, *, mixed: bool = False):
@@ -6599,7 +6597,7 @@ class MainWindow(QMainWindow):
         title = f"Viewer {slot_id}"
         window = FloatingViewerWindow(viewer, title, parent=self)
         window.slot_id = slot_id
-        window.activated.connect(self.set_active_viewer)
+        window.activated.connect(self._activate_floating_action_target)
         window.closing.connect(self._on_floating_viewer_closed)
         window.sync_video_requested.connect(
             lambda current_window=window: self.sync_video_playback_from_window(current_window)
@@ -10946,7 +10944,13 @@ class MainWindow(QMainWindow):
                 detail="verbose",
             )
             if saved_secondary_dir and Path(saved_secondary_dir).exists():
+                restore_browser = self._secondary_browser
+                restore_generation = restore_browser.directory_load_generation
                 def _restore_secondary_directory():
+                    if (self._main_window_closing
+                            or self._secondary_browser is not restore_browser
+                            or restore_browser.directory_load_generation != restore_generation):
+                        return
                     try:
                         diagnostic_print(f"[RESTORE][Browser2] loading folder '{saved_secondary_dir}'", detail="verbose")
                         self._secondary_browser.load_directory(
@@ -10962,11 +10966,13 @@ class MainWindow(QMainWindow):
                     'TAGGUI_SECONDARY_RESTORE_DELAY_MS',
                     5000 if self._startup_load_options is not None else 2500,
                 )
-                QTimer.singleShot(secondary_load_delay_ms, _restore_secondary_directory)
+                QTimer.singleShot(secondary_load_delay_ms, self, _restore_secondary_directory)
             else:
                 diagnostic_print("[RESTORE][Browser2] no valid saved folder to load", detail="verbose")
 
         def _apply_saved_window_mode():
+            if self._main_window_closing:
+                return
             try:
                 if was_fullscreen:
                     self.showFullScreen()
@@ -10979,7 +10985,7 @@ class MainWindow(QMainWindow):
             except Exception as e:
                 print(f"[RESTORE] Failed to reapply saved window mode: {e}")
 
-        QTimer.singleShot(0, _apply_saved_window_mode)
+        QTimer.singleShot(0, self, _apply_saved_window_mode)
         # Keep the restored dock widths authoritative during startup. Without
         # this, the masonry auto-snap can immediately overwrite the user's
         # saved splitter position after the first relayout.
@@ -11015,7 +11021,12 @@ class MainWindow(QMainWindow):
             ):
                 select_path = self._session_settings_value('last_selected_path', '', value_type=str)
 
+            restore_load_session = self._load_session_id
+
             def _restore_directory():
+                if (self._main_window_closing
+                        or self._load_session_id != restore_load_session):
+                    return
                 try:
                     self.load_directory(
                         directory_path,
@@ -11030,7 +11041,7 @@ class MainWindow(QMainWindow):
                 'TAGGUI_PRIMARY_RESTORE_DELAY_MS',
                 150 if self._startup_load_options is not None else 350,
             )
-            QTimer.singleShot(primary_restore_delay_ms, _restore_directory)
+            QTimer.singleShot(primary_restore_delay_ms, self, _restore_directory)
 
     def reset_toolbar_layout(self):
         """Restore toolbar groups to their default docked layout."""

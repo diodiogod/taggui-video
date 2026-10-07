@@ -5,6 +5,25 @@ All notable changes to TagGUI Video 1M are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.6.19] - 2026-10-06
+
+### Added
+
+- Keep the previous frame visible when switching images and reduce repeated work during zoom.
+- Prepare video playback in the background and preserve play/pause intent when changing decoders.
+- Keep review badges on the clicked wall video through playback and background browser refreshes.
+- Prevent delayed saved-folder restoration from replacing a newly selected folder.
+- Stop pending startup and video-control work safely when windows close.
+- Make text search consistent and reduce caption discovery, hover, filtered-count and Quick Sort overhead.
+- Keep workflow JSON separate from TagGUI sidecar metadata when filtering crops.
+
+### Changed
+
+- Improve media viewing and review reliability
+
+### Fixed
+
+- Expand regression coverage for wall badges, folder restoration and video cleanup.
 ## [1.6.18] - 2026-10-03
 
 ### Added

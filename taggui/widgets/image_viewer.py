@@ -498,6 +498,7 @@ class ImageViewer(QWidget):
         # Keep the last displayed media usable by actions when a filter reset
         # removes it from the list.
         self._last_displayed_media = None
+        self._loaded_media_model_owner = None
         self._viewer_model_resetting = False
         self._image_decode_task = LatestTask(self, name='viewer-decode')
         self._image_decode_task.completed.connect(self._on_image_decoded)
@@ -704,7 +705,7 @@ class ImageViewer(QWidget):
             from widgets.video_player import VideoPlayerWidget
 
             self.video_player = VideoPlayerWidget()
-            QTimer.singleShot(0, lambda: (
+            QTimer.singleShot(0, self, lambda: (
                 self.video_player.prewarm_gl_widget(self.view)
                 if self.video_player is not None else None
             ))
@@ -735,7 +736,7 @@ class ImageViewer(QWidget):
         # Native video surfaces can be raised after this setup (especially
         # when the viewer is moved into the dedicated fullscreen host). Raise
         # every viewport overlay again so HUD buttons remain clickable.
-        QTimer.singleShot(0, self.raise_viewport_overlays)
+        QTimer.singleShot(0, self, self.raise_viewport_overlays)
 
     def _iter_video_surface_widgets(self):
         """Yield live native video surface widgets used by backend renderers."""
@@ -2312,9 +2313,10 @@ class ImageViewer(QWidget):
         self._cancel_image_decode()
         if self.current_media is not None:
             self._last_displayed_media = self.current_media
+        retained_media = self._retained_wall_video_media()
         self._viewer_model_resetting = True
         self.proxy_image_index = QPersistentModelIndex()
-        self.current_media = None
+        self.current_media = retained_media
         # Do not leave interactive rectangles attached to an index whose model
         # is being destroyed. They can still receive mouse events during the
         # reset window even though their source model is already unavailable.
@@ -2325,6 +2327,45 @@ class ImageViewer(QWidget):
     def _on_proxy_model_reset(self):
         self._viewer_model_resetting = False
         self.proxy_image_index = QPersistentModelIndex()
+        retained_media = self._retained_wall_video_media()
+        self.current_media = retained_media
+        if retained_media is not None:
+            # The browser may replace resident Image objects or filter this
+            # playing clip out. Rebind only resident metadata; never populate
+            # a cold page just to keep a wall badge alive.
+            source = self.proxy_image_list_model.sourceModel()
+            row = source.get_loaded_row_for_path(retained_media.path)
+            if row >= 0:
+                source_index = source.index(row, 0)
+                image = source_index.data(Qt.ItemDataRole.UserRole)
+                if image is not None and image.path == retained_media.path:
+                    self.current_media = self._last_displayed_media = image
+                    self.proxy_image_index = QPersistentModelIndex(
+                        self.proxy_image_list_model.mapFromSource(source_index))
+        host = self.parentWidget()
+        refresh = getattr(host, 'refresh_review_slots_overlay', None)
+        if callable(refresh):
+            refresh()
+
+    def _retained_wall_video_media(self):
+        """Keep metadata owned by a playing wall clip across browser resets."""
+        if not getattr(self, '_selection_masonry_wall_viewer', False):
+            return None
+        player = getattr(self, 'video_player', None)
+        image = self.current_media or self._last_displayed_media
+        owner = self._loaded_media_model_owner
+        if not self._is_video_loaded or player is None or image is None or owner is None:
+            return None
+        proxy, source, directory, path = owner
+        try:
+            if (proxy is self.proxy_image_list_model
+                    and source is proxy.sourceModel()
+                    and directory == source._directory_path
+                    and path == image.path == player.video_path):
+                return image
+        except RuntimeError:
+            pass
+        return None
 
     def _normalize_proxy_index(self, index_like) -> QModelIndex:
         """Build a fresh, bounds-checked proxy index from QModelIndex/Persistent index."""
@@ -4066,6 +4107,9 @@ class ImageViewer(QWidget):
         self.proxy_image_index = QPersistentModelIndex(proxy_index)
         self.current_media = image
         self._last_displayed_media = image
+        source = self.proxy_image_list_model.sourceModel()
+        self._loaded_media_model_owner = (
+            self.proxy_image_list_model, source, source._directory_path, image.path)
         if not self.is_spawned_viewer:
             try:
                 # Crop measurements are a transient resize aid, not a

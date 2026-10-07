@@ -1271,7 +1271,7 @@ class VideoControlsWidget(QWidget):
                 return
             self._reposition_component_overlays()
 
-        QTimer.singleShot(max(0, int(delay_ms)), _run)
+        QTimer.singleShot(max(0, int(delay_ms)), self, _run)
 
     def _reposition_component_overlays(self):
         """Position real component widgets from anchor slot geometry."""
@@ -2005,8 +2005,8 @@ class VideoControlsWidget(QWidget):
         """Re-run positioning after Qt finishes the current layout pass."""
         from PySide6.QtCore import QTimer
         self._schedule_overlay_reposition(0)
-        QTimer.singleShot(0, self._update_background_surface_geometry)
-        QTimer.singleShot(0, self._sync_height_to_content)
+        QTimer.singleShot(0, self, self._update_background_surface_geometry)
+        QTimer.singleShot(0, self, self._sync_height_to_content)
 
     def _stabilize_after_geometry_change(self):
         """Schedule one deferred layout stabilization pass."""
@@ -2023,7 +2023,7 @@ class VideoControlsWidget(QWidget):
             self._sync_height_to_content()
             self._schedule_layout_settle_reflow()
 
-        QTimer.singleShot(0, _pass)
+        QTimer.singleShot(0, self, _pass)
 
     def _sync_height_to_content(self):
         """Keep widget height aligned to current content/layout while preserving width."""
@@ -2081,7 +2081,7 @@ class VideoControlsWidget(QWidget):
 
         # Apply after layout settles
         from PySide6.QtCore import QTimer
-        QTimer.singleShot(50, self._apply_designer_positions_now)
+        QTimer.singleShot(50, self, self._apply_designer_positions_now)
 
     def _apply_designer_positions_now(self):
         """Internal method to apply legacy designer positions safely."""
@@ -2474,7 +2474,7 @@ class VideoControlsWidget(QWidget):
         # Reapply designer positions after scaling
         if hasattr(self, '_designer_positions') and self._designer_positions:
             from PySide6.QtCore import QTimer
-            QTimer.singleShot(10, self._apply_designer_positions_now)
+            QTimer.singleShot(10, self, self._apply_designer_positions_now)
 
     def showEvent(self, event):
         """Ensure overlay-positioned components snap to valid anchors when shown."""

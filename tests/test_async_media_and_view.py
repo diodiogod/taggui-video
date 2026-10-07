@@ -16,7 +16,7 @@ from models.proxy_image_list_model import ProxyImageListModel
 from widgets import image_viewer
 from utils.folder_snapshot import collect_folder_snapshot
 
-from qt_test_helpers import APP, pump, dispose_widget
+from qt_test_helpers import APP, pump, dispose_widget, dispose_qobject
 
 
 def test_viewer_replaces_slow_selection_and_installs_only_latest_pixels(tmp_path,monkeypatch):
@@ -177,6 +177,9 @@ def test_ordered_preparation_supersedes_filter_and_preserves_target_rank(tmp_pat
         model._view_prepare_task.drain()
         model.shutdown_background_workers()
         db.close()
+        dispose_qobject(model.image_list_selection_model)
+        dispose_qobject(proxy)
+        dispose_qobject(model)
 
 
 def test_folder_snapshot_preserves_recursive_counts_and_skips_internal_dirs(tmp_path):
@@ -217,6 +220,9 @@ def paginated_model(tmp_path):
         model._view_prepare_task.drain()
         model.shutdown_background_workers()
         db.close()
+        dispose_qobject(model.image_list_selection_model)
+        dispose_qobject(proxy)
+        dispose_qobject(model)
         APP.processEvents()
 
 

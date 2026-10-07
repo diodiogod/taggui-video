@@ -15,8 +15,13 @@ def dispose_widget(widget):
     Callers must first drain workers which hold file/model resources.
     """
     widget.close()
-    widget.deleteLater()
-    QCoreApplication.sendPostedEvents(widget, QEvent.DeferredDelete)
+    dispose_qobject(widget)
+
+
+def dispose_qobject(owner):
+    """Complete native deletion; callers first drain workers and dependants."""
+    owner.deleteLater()
+    QCoreApplication.sendPostedEvents(owner, QEvent.DeferredDelete)
 
 
 def pump(predicate, seconds=4):
