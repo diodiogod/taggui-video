@@ -4548,7 +4548,7 @@ class ImageListModel(QAbstractListModel):
             if not hasattr(self, '_page_load_debounce_timer'):
                 self._page_load_debounce_timer = QTimer()
                 self._page_load_debounce_timer.setSingleShot(True)
-                self._page_load_debounce_timer.timeout.connect(lambda: self.layoutChanged.emit())
+                self._page_load_debounce_timer.timeout.connect(self._emit_paginated_layout_refresh)
 
             # Trigger layout change after 200ms of no new page loads
             self._page_load_debounce_timer.stop()
@@ -4593,6 +4593,10 @@ class ImageListModel(QAbstractListModel):
         if self._paginated_mode:
             self._bootstrap_complete = False
         self._emit_pages_updated()
+        # QSortFilterProxyModel captures its persistent selections in the
+        # about-to-change signal. An unpaired layoutChanged leaves those
+        # selections pointing at freed native mapping storage.
+        self.layoutAboutToBeChanged.emit()
         self.layoutChanged.emit()
         if self._paginated_mode:
             QTimer.singleShot(0, self._finalize_paginated_bootstrap_refresh)

@@ -5,6 +5,19 @@ All notable changes to TagGUI Video 1M are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.6.20] - 2026-10-09
+
+### Added
+
+- Keep video range extraction from interrupting your next selection
+- Add extracted clips to the media list without flashing black or restarting the source video
+- Preserve playback position, play/pause state, and the next range markers while extraction finishes
+- Replace the extraction success dialog with brief feedback so you can keep working
+- Keep selection advancing correctly after deleting images in a randomly sorted list
+
+### Changed
+
+- Improve selection stability during media-list refreshes
 ## [1.6.19] - 2026-10-06
 
 ### Added

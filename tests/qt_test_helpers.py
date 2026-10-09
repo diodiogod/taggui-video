@@ -30,3 +30,13 @@ def pump(predicate, seconds=4):
         APP.processEvents()
         time.sleep(.002)
     assert predicate()
+
+
+def assert_capture_contains_color(image, color, *, tolerance=25, minimum_fraction=.1):
+    """Validate known fixture pixels; a white/blank successful capture must fail too."""
+    assert not image.isNull(), 'Capture returned no pixels'
+    sample = image.scaled(32, 32)
+    matched = sum(all(abs(channel - expected) <= tolerance for channel, expected in
+                      zip(sample.pixelColor(x, y).getRgb()[:3], color))
+                  for y in range(sample.height()) for x in range(sample.width()))
+    assert matched >= sample.width() * sample.height() * minimum_fraction, 'Expected fixture color is absent from capture'

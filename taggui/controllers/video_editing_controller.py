@@ -2,7 +2,8 @@
 
 from pathlib import Path
 from PIL import Image as PILImage
-from PySide6.QtWidgets import QMessageBox, QInputDialog, QProgressDialog
+from PySide6.QtWidgets import QMessageBox, QInputDialog, QProgressDialog, QToolTip
+from PySide6.QtGui import QCursor
 from PySide6.QtCore import QObject, QRunnable, QThreadPool, Qt, QTimer, Signal
 from collections import deque
 
@@ -955,12 +956,16 @@ class VideoEditingController:
                 self._copy_extract_sidecars(input_path, new_path)
                 registered = self._register_generated_media(new_path, select=False)
                 self._refresh_edited_video_metadata(new_path)
-                QMessageBox.information(self.main_window, "Success", f"{operation_desc}:\n{new_path.name}")
                 if not registered:
                     QMessageBox.warning(
                         self.main_window,
                         "Copy Registration Failed",
                         f"Created the video but could not add it to the image list:\n{new_path.name}",
+                    )
+                else:
+                    QToolTip.showText(
+                        QCursor.pos(), f"{operation_desc}:\n{new_path.name}",
+                        self.main_window, msecShowTime=5000,
                     )
 
             self._run_video_operation_async(

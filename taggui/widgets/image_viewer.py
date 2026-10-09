@@ -499,6 +499,7 @@ class ImageViewer(QWidget):
         # removes it from the list.
         self._last_displayed_media = None
         self._loaded_media_model_owner = None
+        self._loaded_video_mtime = None
         self._viewer_model_resetting = False
         self._image_decode_task = LatestTask(self, name='viewer-decode')
         self._image_decode_task.completed.connect(self._on_image_decoded)
@@ -4070,6 +4071,25 @@ class ImageViewer(QWidget):
         except Exception:
             pass
 
+    def _can_reuse_loaded_video(self, image):
+        """Reuse pixels only for the same unchanged media and model owner."""
+        player = self.video_player
+        owner = self._loaded_media_model_owner
+        item = self.current_video_item
+        if (not image.is_video or not self._is_video_loaded or player is None
+                or owner is None or item is None or self._compare_mode_active):
+            return False
+        if _shiboken_is_valid is not None and not _shiboken_is_valid(item):
+            return False
+        proxy, source, directory, path = owner
+        return (proxy is self.proxy_image_list_model
+                and source is proxy.sourceModel()
+                and directory == source._directory_path
+                and path == image.path == player.video_path
+                and self._loaded_video_mtime is not None
+                and self._loaded_video_mtime == image.mtime
+                and item.scene() is self.scene)
+
     def _load_image_impl(self, proxy_image_index: QModelIndex, is_complete = True, *, decoded_image=None):
         if self._viewer_model_resetting:
             return
@@ -4098,6 +4118,13 @@ class ImageViewer(QWidget):
         if image is None:
             # Page not loaded yet in pagination mode - wait
             return
+        if self._can_reuse_loaded_video(image):
+            # A generated clip refresh replaces the browser's Image objects
+            # and restores the same selection. Keep its native surface,
+            # position, play intent and the next range's controls untouched.
+            is_complete = False
+            self.video_controls.current_image = image
+            self.video_controls.proxy_image_list_model = self.proxy_image_list_model
         if not is_complete and self._image_decode_owner is not None:
             # Metadata is read from the live image when its accepted decode
             # installs. Do not attach new markings to an empty/loading scene.
@@ -4110,7 +4137,7 @@ class ImageViewer(QWidget):
         source = self.proxy_image_list_model.sourceModel()
         self._loaded_media_model_owner = (
             self.proxy_image_list_model, source, source._directory_path, image.path)
-        if not self.is_spawned_viewer:
+        if is_complete and not self.is_spawned_viewer:
             try:
                 # Crop measurements are a transient resize aid, not a
                 # persistent thumbnail overlay. Clear any label left by the
@@ -4186,6 +4213,7 @@ class ImageViewer(QWidget):
                     preview_qimage=getattr(image, 'thumbnail_qimage', None),
                     video_dimensions=getattr(image, 'dimensions', None),
                 ):
+                    self._loaded_video_mtime = image.mtime
                     # Update scene rect after video loads
                     if image_item.pixmap() and not image_item.pixmap().isNull():
                         self._set_scene_rect_for_item(image_item)
