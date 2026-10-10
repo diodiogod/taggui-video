@@ -132,9 +132,20 @@ Precise extract is the frame-accurate option.
 - uses the marked range exactly
 - supports optional reverse extraction
 - supports optional speed and FPS changes during extraction
+- supports applying the current crop during the same encode
 - supports extract-as-copy output
 
 This is the better path when exact frame count matters.
+
+To crop and extract together, draw a crop rectangle on the source video, set the
+range markers, and leave **Apply current crop** checked in the precise extraction
+dialog. Cropping, range extraction, reverse, and speed/FPS adjustments share one
+encode pass. You do not need to apply the crop to the source file first.
+Crop width and height round down to even dimensions when needed for H.264 output.
+With **Extract as copy**, the source keeps its crop and markers so you can prepare
+the next segment while extraction runs.
+Crop outlines, resize guides, and labels stay above MPV's playing video and
+reverse-playback frame covers, so you can draw or adjust the box during playback.
 
 ### In-Place Edits and Backups
 

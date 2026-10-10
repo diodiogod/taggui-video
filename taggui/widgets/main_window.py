@@ -1705,6 +1705,7 @@ class MainWindow(QMainWindow):
                 event.ignore()
                 return
         self._main_window_closing = True
+        self.is_running = False
         self._arm_shutdown_failsafe()
         self.cancel_compare_drag()
         self.close_all_floating_viewers()

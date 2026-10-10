@@ -10,7 +10,8 @@ from utils.marking_effects import MARKING_EFFECTS
 from utils.settings import settings, DEFAULT_SETTINGS
 from utils.rect import RectPosition, map_rect_position_to_cursor
 from widgets.ideogram_region_item import IdeogramRegionItem
-from widgets.marking import MarkingItem, MarkingLabel, grid
+from widgets.marking import MarkingItem, MarkingLabel, ResizeHintHUD, grid
+from widgets.scene_foreground_overlay import SceneForegroundOverlay
 
 
 class ImageGraphicsView(QGraphicsView):
@@ -66,6 +67,14 @@ class ImageGraphicsView(QGraphicsView):
         self._last_interacted_marking = None
         self._suppress_next_floating_context = False
         self.clear_scene()
+        self.foreground_overlay = SceneForegroundOverlay(self, self._is_foreground_item)
+
+    def _is_foreground_item(self, item):
+        root = item
+        while root.parentItem() is not None:
+            root = root.parentItem()
+        return (isinstance(root, (MarkingItem, ResizeHintHUD, IdeogramRegionItem))
+                or root is self.horizontal_line or root is self.vertical_line)
 
     def _interactive_region_at(self, scene_pos):
         for item in self.scene().items(scene_pos):
@@ -558,7 +567,11 @@ class ImageGraphicsView(QGraphicsView):
                     should_ask_for_confirmation=False,
                 )
 
-            self.image_viewer.add_rectangle(QRect(self.last_pos, QSize(0, 0)),
+            start_pos = scene_pos.toPoint()
+            if event.modifiers() & Qt.KeyboardModifier.ShiftModifier:
+                start_pos = grid.snap(start_pos).toPoint()
+            self.last_pos = start_pos
+            self.image_viewer.add_rectangle(QRect(start_pos, QSize(0, 0)),
                                             rect_type, interactive=True)
             self.set_insertion_mode(ImageMarking.NONE)
             self.setDragMode(QGraphicsView.DragMode.NoDrag)

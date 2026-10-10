@@ -760,6 +760,13 @@ class ImageViewer(QWidget):
 
     def raise_viewport_overlays(self):
         """Keep viewport-local HUD overlays above native video cover widgets."""
+        player = getattr(self, 'video_player', None)
+        if player is not None:
+            self.view.foreground_overlay.sync_surfaces(
+                getattr(player, name, None) for name in (
+                    'mpv_widget', 'vlc_widget', '_opencv_cover_label', '_vlc_cover_label',
+                )
+            )
         for overlay in (
             getattr(self, "_video_seek_back_overlay", None),
             getattr(self, "_video_seek_forward_overlay", None),
@@ -5562,8 +5569,14 @@ class ImageViewer(QWidget):
         self._apply_marking_ideogram_overlay_priority()
 
     def get_selected_type(self) -> ImageMarking:
-        if len(self.scene.selectedItems()) > 0:
-            selected_item = self.scene.selectedItems()[0]
+        try:
+            selected_items = self.scene.selectedItems()
+        except RuntimeError:
+            # Scene teardown can emit selectionChanged after its native
+            # object has gone away; menu callbacks have no selection then.
+            return ImageMarking.NONE
+        if selected_items:
+            selected_item = selected_items[0]
             rect_type = getattr(selected_item, 'rect_type', None)
             if rect_type is not None:
                 return rect_type

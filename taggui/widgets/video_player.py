@@ -661,6 +661,13 @@ class VideoPlayerWidget(QWidget):
                 pass
             if not self.mpv_geometry_timer.isActive():
                 self.mpv_geometry_timer.start()
+        self._raise_viewport_overlays()
+
+    def _raise_viewport_overlays(self):
+        view = self._resolve_mpv_target_view()
+        viewer = getattr(view, 'image_viewer', None)
+        if viewer is not None and hasattr(viewer, 'raise_viewport_overlays'):
+            viewer.raise_viewport_overlays()
 
     def set_application_render_active(self, active: bool) -> None:
         """Keep MPV GL work away from cross-GPU app activation transitions."""
@@ -841,6 +848,7 @@ class VideoPlayerWidget(QWidget):
                         pass
         except RuntimeError:
             self.vlc_widget = None
+        self._raise_viewport_overlays()
 
     def _update_vlc_geometry_from_pixmap(self):
         """Keep vlc proxy geometry aligned with current pixmap frame size."""
@@ -892,6 +900,7 @@ class VideoPlayerWidget(QWidget):
             label.setPixmap(QPixmap())
         except RuntimeError:
             self._vlc_cover_label = None
+        self._raise_viewport_overlays()
 
     def _show_vlc_cover_overlay(self):
         """Show a still preview above VLC while first frame stabilizes."""
@@ -933,6 +942,7 @@ class VideoPlayerWidget(QWidget):
             self._update_vlc_cover_geometry_from_pixmap()
             label.show()
             label.raise_()
+            self._raise_viewport_overlays()
         except RuntimeError:
             self._vlc_cover_label = None
             self._vlc_cover_active = False
@@ -1004,6 +1014,7 @@ class VideoPlayerWidget(QWidget):
             label.setPixmap(QPixmap())
         except RuntimeError:
             self._opencv_cover_label = None
+        self._raise_viewport_overlays()
 
     def _show_opencv_frame_as_overlay(self, pixmap: 'QPixmap'):
         """Display an OpenCV frame as a native QLabel overlay above MPV widget.

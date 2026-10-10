@@ -113,11 +113,12 @@ class FrameEditor:
     @staticmethod
     def extract_range(input_path: Path, output_path: Path,
                       start_frame: int, end_frame: int, fps: float, reverse: bool = False,
-                      speed_factor: float = 1.0, target_fps: Optional[float] = None) -> Tuple[bool, str]:
+                      speed_factor: float = 1.0, target_fps: Optional[float] = None,
+                      crop_rect: Optional[Tuple[int, int, int, int]] = None) -> Tuple[bool, str]:
         """
         Extract a frame range from video with FRAME ACCURACY (re-encodes).
         SLOW but PRECISE. Creates .backup of original if input == output.
-        Optionally apply speed and/or FPS changes in the same encode pass.
+        Optionally apply a crop, speed and/or FPS changes in the same encode pass.
 
         Args:
             input_path: Input video file path
@@ -128,14 +129,33 @@ class FrameEditor:
             reverse: If True, reverse the extracted video
             speed_factor: Speed multiplier (2.0 = 2x faster, 0.5 = half speed). Default: 1.0
             target_fps: Target FPS for output. If None, keeps original FPS. Default: None
+            crop_rect: Optional (x, y, width, height) in source-frame coordinates.
+                Width and height must be even for the existing H.264 output.
 
         Returns:
             Tuple of (success: bool, message: str)
         """
         try:
-            has_audio, _, _, probe_error = FrameEditor._probe_streams(input_path)
+            has_audio, _, video_stream, probe_error = FrameEditor._probe_streams(input_path)
             if probe_error:
                 return False, f"Failed to probe video: {probe_error}"
+            if crop_rect is not None:
+                if (len(crop_rect) != 4 or any(type(value) is not int for value in crop_rect)):
+                    return False, "Crop must contain integer x, y, width and height values."
+                x, y, width, height = crop_rect
+                if x < 0 or y < 0 or width < 2 or height < 2 or width % 2 or height % 2:
+                    return False, "Crop must have positive even dimensions and a non-negative origin."
+                if video_stream is None:
+                    return False, "Could not determine the source dimensions for cropping."
+                source_width, source_height = int(video_stream['width']), int(video_stream['height'])
+                rotation = float((video_stream.get('tags') or {}).get('rotate', 0) or 0)
+                for side_data in video_stream.get('side_data_list') or []:
+                    if 'rotation' in side_data:
+                        rotation = float(side_data['rotation'])
+                if round(rotation) % 180:
+                    source_width, source_height = source_height, source_width
+                if x + width > source_width or y + height > source_height:
+                    return False, f"Crop must fit within the {source_width}x{source_height} source frame."
 
             # Create backup if replacing original
             if input_path == output_path:
@@ -159,6 +179,10 @@ class FrameEditor:
                 f'trim=start={start_time:.6f}:duration={duration:.6f}',
                 'setpts=PTS-STARTPTS',
             ]
+            if crop_rect is not None:
+                # Crop before reverse so its frame buffer only stores the
+                # selected area. exact=1 preserves odd x/y coordinates.
+                vf_parts.append(f'crop={width}:{height}:{x}:{y}:exact=1')
             if reverse:
                 vf_parts.append('reverse')
 
@@ -259,10 +283,11 @@ class FrameEditor:
                 reversed_msg = " (reversed)" if reverse else ""
                 speed_msg = f" at {speed_factor}x speed" if abs(speed_factor - 1.0) >= 0.01 else ""
                 fps_msg = f" @ {target_fps}fps" if target_fps is not None else ""
+                crop_msg = f" cropped to {width}x{height}" if crop_rect is not None else ""
 
                 # Get actual frame count for success message
                 actual_output_frames = actual_frames if 'actual_frames' in locals() else expected_output_frames
-                return True, f"Successfully extracted {input_frames} frames ({start_frame}-{end_frame}) → {actual_output_frames} output frames{reversed_msg}{speed_msg}{fps_msg}"
+                return True, f"Successfully extracted {input_frames} frames ({start_frame}-{end_frame}) → {actual_output_frames} output frames{reversed_msg}{speed_msg}{fps_msg}{crop_msg}"
             else:
                 return False, f"ffmpeg error: {result.stderr}"
 

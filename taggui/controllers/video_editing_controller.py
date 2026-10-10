@@ -4,7 +4,7 @@ from pathlib import Path
 from PIL import Image as PILImage
 from PySide6.QtWidgets import QMessageBox, QInputDialog, QProgressDialog, QToolTip
 from PySide6.QtGui import QCursor
-from PySide6.QtCore import QObject, QRunnable, QThreadPool, Qt, QTimer, Signal
+from PySide6.QtCore import QObject, QRunnable, QThreadPool, QRect, Qt, QTimer, Signal
 from collections import deque
 
 from utils.sidecar import (
@@ -12,6 +12,7 @@ from utils.sidecar import (
     is_taggui_metadata_dict,
     json_sidecar_paths_for_media,
     preferred_taggui_sidecar_read_path,
+    read_taggui_metadata,
     restore_json_sidecars,
     taggui_sidecar_path,
 )
@@ -564,7 +565,7 @@ class VideoEditingController:
             new_path = directory / f"{new_stem}{suffix}"
         return new_path
 
-    def _copy_extract_sidecars(self, input_path: Path, output_path: Path):
+    def _copy_extract_sidecars(self, input_path: Path, output_path: Path, *, crop_rect=None):
         """Copy sidecars for an extracted copy, then clear invalid loop markers."""
         import shutil
 
@@ -575,7 +576,62 @@ class VideoEditingController:
 
         if any(path.exists() for path in json_sidecar_paths_for_media(input_path)):
             copy_existing_json_sidecars(input_path, output_path)
+            if crop_rect is not None:
+                self._consume_extraction_crop(output_path, crop_rect)
             self._clear_video_loop_markers(output_path, disable_current_loop=False)
+
+    def _consume_extraction_crop(self, media_path: Path, crop_rect):
+        """Clear an applied crop and move owned annotations into output coordinates."""
+        from utils.image import ImageMarking, Marking, transform_markings_for_crop
+
+        metadata = None
+        for sidecar_path in json_sidecar_paths_for_media(media_path):
+            if not sidecar_path.exists():
+                continue
+            try:
+                metadata = read_taggui_metadata(sidecar_path)
+            except (OSError, ValueError, UnicodeError):
+                continue
+            if metadata is not None:
+                break
+        if metadata is None:
+            return
+        crop = QRect(*crop_rect)
+        metadata.pop('crop', None)
+        metadata.pop('target_dimension', None)
+        if isinstance(metadata.get('markings'), list):
+            transformed = []
+            for entry in metadata['markings']:
+                if not isinstance(entry, dict) or not isinstance(entry.get('rect'), list):
+                    transformed.append(entry)
+                    continue
+                try:
+                    marking_type = ImageMarking.__members__.get(entry.get('type'), ImageMarking.HINT)
+                    marking = Marking('', marking_type, QRect(*entry['rect']))
+                    clipped = transform_markings_for_crop([marking], crop)
+                except (TypeError, ValueError):
+                    transformed.append(entry)
+                    continue
+                if clipped:
+                    transformed.append({**entry, 'rect': list(clipped[0].rect.getRect())})
+            metadata['markings'] = transformed
+        try:
+            taggui_sidecar_path(media_path).write_text(json.dumps(metadata), encoding='UTF-8')
+        except OSError as error:
+            print(f"Failed to update cropped extraction metadata for {media_path}: {error}")
+            return
+
+        # In-place extraction can still have a resident Image whose metadata
+        # would otherwise reintroduce the consumed crop when loops are cleared.
+        model = getattr(self.main_window, 'image_list_model', None)
+        if model is not None:
+            row = model.get_loaded_row_for_path(media_path)
+            if row >= 0:
+                image = model.index(row, 0).data(Qt.ItemDataRole.UserRole)
+                if image is not None and image.path == media_path:
+                    image.crop = None
+                    image.target_dimension = None
+                    model._apply_image_metadata_from_meta(image, metadata)
 
     def _run_video_operation(self, operation_name: str, operation_func, *args):
         """Run a video editing operation and show progress."""
@@ -842,6 +898,27 @@ class VideoEditingController:
         extract_as_copy_checkbox.setToolTip("Create a copy with the extracted range instead of replacing the current video")
         layout.addWidget(extract_as_copy_checkbox)
 
+        image = self.main_window.image_viewer.current_media
+        crop_rect = None
+        if image is not None and image.path == input_path and image.crop is not None:
+            crop = QRect(image.crop).normalized()
+            width, height = crop.width() // 2 * 2, crop.height() // 2 * 2
+            if width >= 2 and height >= 2:
+                # Snapshot the rectangle: the user can choose a new crop while
+                # this operation's worker is still encoding the previous one.
+                crop_rect = (crop.x(), crop.y(), width, height)
+        crop_checkbox = QCheckBox(
+            f"Apply current crop ({crop_rect[2]} × {crop_rect[3]})"
+            if crop_rect is not None else "Apply current crop (draw a crop box first)"
+        )
+        crop_checkbox.setEnabled(crop_rect is not None)
+        crop_checkbox.setChecked(crop_rect is not None)
+        crop_checkbox.setToolTip(
+            "Crop the selected range in the same encode pass.\n"
+            "Width and height are rounded down to even dimensions when needed."
+        )
+        layout.addWidget(crop_checkbox)
+
         # Update info label based on checkbox state
         def update_info_label():
             if extract_as_copy_checkbox.isChecked():
@@ -937,6 +1014,7 @@ class VideoEditingController:
         extract_as_copy = extract_as_copy_checkbox.isChecked()
         speed_factor = speed_fps_settings['speed'] if speed_fps_settings['speed'] is not None else 1.0
         target_fps = speed_fps_settings['fps']
+        selected_crop = crop_rect if crop_checkbox.isChecked() else None
 
         if extract_as_copy:
             new_path = self._build_extract_copy_path(input_path, start_frame, end_frame)
@@ -947,13 +1025,15 @@ class VideoEditingController:
                 operation_desc += f" at {speed_factor}x speed"
             if target_fps is not None:
                 operation_desc += f" @ {target_fps}fps"
+            if selected_crop is not None:
+                operation_desc += f" cropped to {selected_crop[2]}x{selected_crop[3]}"
 
             def finish_copy(result):
                 success, message = result
                 if not success:
                     QMessageBox.critical(self.main_window, "Error", message)
                     return
-                self._copy_extract_sidecars(input_path, new_path)
+                self._copy_extract_sidecars(input_path, new_path, crop_rect=selected_crop)
                 registered = self._register_generated_media(new_path, select=False)
                 self._refresh_edited_video_metadata(new_path)
                 if not registered:
@@ -979,6 +1059,7 @@ class VideoEditingController:
                     reverse=reverse,
                     speed_factor=speed_factor,
                     target_fps=target_fps,
+                    crop_rect=selected_crop,
                 ),
                 finish_copy,
                 window_modal=False,
@@ -992,6 +1073,8 @@ class VideoEditingController:
                 operation_desc += f" at {speed_factor}x speed"
             if target_fps is not None:
                 operation_desc += f" @ {target_fps}fps"
+            if selected_crop is not None:
+                operation_desc += f" cropped to {selected_crop[2]}x{selected_crop[3]}"
             self._save_undo_snapshot(input_path, operation_desc)
 
             # Release file handles before editing
@@ -1002,6 +1085,8 @@ class VideoEditingController:
                 if not success:
                     QMessageBox.critical(self.main_window, "Error", message)
                     return
+                if selected_crop is not None:
+                    self._consume_extraction_crop(input_path, selected_crop)
                 self._clear_video_loop_markers(input_path, disable_current_loop=True)
                 self._refresh_edited_video_metadata(input_path)
                 QMessageBox.information(self.main_window, "Success", message)
@@ -1022,6 +1107,7 @@ class VideoEditingController:
                     reverse=reverse,
                     speed_factor=speed_factor,
                     target_fps=target_fps,
+                    crop_rect=selected_crop,
                 ),
                 finish_replacement,
                 window_modal=True,
