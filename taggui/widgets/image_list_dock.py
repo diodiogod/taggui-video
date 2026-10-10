@@ -1682,6 +1682,14 @@ class ImageList(QDockWidget):
 
     def _on_ordered_view_ready(self, result):
         reason = result['request']['reason']
+        if reason in ('metadata', 'refresh'):
+            if (result['total'] > 0 and result['request']['restore_selection']
+                    and result['request']['selected_path'] is not None):
+                # Page rows and SQL ranks both move when a generated clip is
+                # inserted. Retire old rank-based restoration before the model
+                # restores the selected path, even while masonry is busy.
+                self._rebind_refresh_selection_anchor(result['target'])
+            return
         if reason not in ('sort', 'delete'):
             return
         if (result['total'] <= 0 or (reason == 'sort' and (
@@ -1702,6 +1710,19 @@ class ImageList(QDockWidget):
         self.list_view.layout_ready.connect(self._do_scroll_after_sort)
         QTimer.singleShot(0, self, self._do_scroll_after_sort)
         QTimer.singleShot(1000, self, self._do_scroll_after_sort)
+
+    def _rebind_refresh_selection_anchor(self, target_global: int):
+        """Keep delayed layout work attached to the refreshed selected path."""
+        view = self.list_view
+        view._clear_explicit_jump_tracking()
+        view._clear_pending_targeted_relocation()
+        view._selected_global_lock_until = 0.0
+        view._selected_global_lock_value = None
+        view._strict_jump_until = 0.0
+        view._strict_jump_target_global = None
+        self._image_to_scroll_to = None
+        self._sort_restore_target_global = None
+        self._arm_sort_restore_anchor(self.proxy_image_list_model.sourceModel(), target_global)
 
     @Slot()
     def _arm_sort_restore_anchor(self, source_model, target_global: int):

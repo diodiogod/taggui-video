@@ -1033,13 +1033,23 @@ class VideoControlsWidget(QWidget):
 
         # Loop controls - smaller buttons with text labels
         self.loop_start_btn = QPushButton('◀')  # Triangle pointing left/down
-        self.loop_start_btn.setToolTip('Set Loop Start at current frame (Pink marker)')
+        self.loop_start_btn.setToolTip(
+            'Left-click: set start at current frame (Pink marker)\n'
+            'Middle-click: jump to start marker'
+        )
+        self.loop_start_btn.setProperty('video_marker_jump', 'loop_start_frame')
+        self.loop_start_btn.installEventFilter(self)
         self.loop_start_btn.setMaximumWidth(30)
         # Style will be applied by apply_current_skin() after skin_manager is initialized
         self.loop_start_btn.clicked.connect(self._set_loop_start)
 
         self.loop_end_btn = QPushButton('▶')  # Triangle pointing right/down
-        self.loop_end_btn.setToolTip('Set Loop End at current frame (Orange marker)')
+        self.loop_end_btn.setToolTip(
+            'Left-click: set end at current frame (Orange marker)\n'
+            'Middle-click: jump to end marker'
+        )
+        self.loop_end_btn.setProperty('video_marker_jump', 'loop_end_frame')
+        self.loop_end_btn.installEventFilter(self)
         self.loop_end_btn.setMaximumWidth(30)
         # Style will be applied by apply_current_skin() after skin_manager is initialized
         self.loop_end_btn.clicked.connect(self._set_loop_end)
@@ -2546,7 +2556,21 @@ class VideoControlsWidget(QWidget):
         return max(0, min(int(resolved), int(max_frame)))
 
     def eventFilter(self, obj, event):
-        """Event filter for speed slider mouse tracking and global mouse release."""
+        """Handle marker jumps, speed slider tracking and global mouse release."""
+        marker_attribute = obj.property('video_marker_jump')
+        if (marker_attribute and event.type() in (
+                event.Type.MouseButtonPress, event.Type.MouseButtonRelease,
+                event.Type.MouseButtonDblClick)
+                and event.button() == Qt.MouseButton.MiddleButton):
+            if event.type() == event.Type.MouseButtonPress:
+                frame = getattr(self, marker_attribute, None)
+                if frame is not None:
+                    self.frame_changed.emit(frame)
+            # Keep this gesture from setting a marker or reaching window drag
+            # handlers, including when the requested marker has not been set.
+            event.accept()
+            return True
+
         # Handle global mouse release to catch releases outside widget during resize/drag
         if obj == self.parent() and event.type() == event.Type.MouseButtonRelease:
             if (self._resizing or self._dragging) and event.button() == Qt.MouseButton.LeftButton:

@@ -155,7 +155,7 @@ def test_precise_copy_keeps_playback_and_next_markers(opened_video, monkeypatch,
     samples = []
     capture_timer = QTimer(host)
     capture_timer.setInterval(40)
-    capture_timer.timeout.connect(lambda: samples.append(visible_pixels(viewer)))
+    capture_timer.timeout.connect(lambda: samples.append(visible_pixels(viewer).scaled(128, 128)))
     try:
         controller.extract_video_range()
         assert started.wait(3)
@@ -230,14 +230,19 @@ def test_changed_video_or_folder_requires_reopen(opened_video):
     assert not viewer._can_reuse_loaded_video(image)
 
 
-def test_repeated_copies_keep_source_when_its_list_row_moves(opened_video, monkeypatch):
+@pytest.mark.parametrize('sort_by', ['Name', 'Modified'])
+@pytest.mark.parametrize('thumbnail_size', [96, 512])
+def test_repeated_copies_keep_source_when_its_list_row_moves(opened_video, monkeypatch, sort_by, thumbnail_size):
     host, path, errors = opened_video
     viewer, source = host.image_viewer, host.image_list_model
     player, controls = viewer.video_player, viewer.video_controls
     ready, loads, modal_messages = [], [], []
     source.ordered_view_ready.connect(ready.append)
+    host._set_image_list_thumbnail_size(thumbnail_size)
+    QTest.qWait(450)
+    assert host.image_list.list_view.use_masonry is (thumbnail_size == 96)
     # Newly generated filenames sort ahead of their source in descending order.
-    host.image_list.set_sort_state('Name', 'DESC')
+    host.image_list.set_sort_state(sort_by, 'DESC')
     pump(lambda: bool(ready) and source._view_prepare_owner is None)
     QTest.qWait(250)
     assert viewer.current_media.path == path
@@ -258,7 +263,7 @@ def test_repeated_copies_keep_source_when_its_list_row_moves(opened_video, monke
     samples = []
     capture_timer = QTimer(host)
     capture_timer.setInterval(40)
-    capture_timer.timeout.connect(lambda: samples.append(visible_pixels(viewer)))
+    capture_timer.timeout.connect(lambda: samples.append(visible_pixels(viewer).scaled(128, 128)))
     controls.apply_loop_state(24, 96, False, save=True, emit_signals=True)
     try:
         for row, extracted, next_range in (
@@ -274,9 +279,16 @@ def test_repeated_copies_keep_source_when_its_list_row_moves(opened_video, monke
                 capture_timer.start()
             pump(lambda: not host.video_editing_controller._video_operation_active
                  and len(ready) > previous_ready, seconds=25)
-            QTest.qWait(350)
+            QTest.qWait(1200)
             capture_timer.stop()
+            # A later page notification can replay the old global selection;
+            # activation then synchronizes the viewer to that browser index.
+            source._emit_pages_updated()
+            QTest.qWait(150)
+            host._restore_active_browser_context_after_activation()
+            assert player.video_path == path
             assert source.get_loaded_row_for_path(path) == row
+            assert host.image_list.list_view._selected_global_index == row
             assert host.image_list_selection_model.currentIndex().data(Qt.UserRole).path == path
             assert viewer.current_media.path == path
             assert controls.current_image is viewer.current_media

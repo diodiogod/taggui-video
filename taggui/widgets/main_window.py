@@ -1341,6 +1341,10 @@ class MainWindow(QMainWindow):
         if event_type == event.Type.MouseButtonPress:
             try:
                 if event.button() == Qt.MouseButton.MiddleButton:
+                    if isinstance(obj, QWidget) and obj.property('video_marker_jump'):
+                        # Let the clicked controls seek their own marker before
+                        # the main viewer's middle-click hold-mode shortcut.
+                        return False
                     focus_widget = QApplication.focusWidget()
                     if isinstance(focus_widget, (QLineEdit, QTextEdit, QPlainTextEdit)):
                         return False
