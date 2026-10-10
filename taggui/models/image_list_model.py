@@ -9461,6 +9461,9 @@ class ImageListModel(QAbstractListModel):
             meta['review_updated_at'] = float(review_updated_at)
         if image.crop is not None:
             meta['crop'] = image.crop.getRect()
+        else:
+            # The resident crop is authoritative, including explicit deletion.
+            meta.pop('crop', None)
         meta['markings'] = [{'label': marking.label,
                              'type': marking.type.name,
                              'confidence': marking.confidence,

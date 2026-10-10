@@ -5,6 +5,19 @@ All notable changes to TagGUI Video 1M are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.6.21] - 2026-10-10
+
+### Added
+
+- Middle-click the start or end marker button to jump directly to its saved frame.
+- Keep the source video selected while extracted clips are added to the list.
+- Apply the current crop during precise extraction in the same encode pass as range, reverse, speed, and FPS changes.
+- Keep crop outlines and resize guides visible while videos are playing.
+- Prevent deleted crop boxes from returning on the source or appearing on extracted clips.
+
+### Changed
+
+- Improve video cropping and range extraction
 ## [1.6.20] - 2026-10-09
 
 ### Added

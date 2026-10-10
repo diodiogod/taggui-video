@@ -9,12 +9,14 @@ from types import SimpleNamespace
 
 import cv2
 import pytest
-from PySide6.QtCore import QRect, QTimer
+from PySide6.QtCore import QEvent, QPointF, QRect, QTimer, Qt
+from PySide6.QtGui import QMouseEvent
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QCheckBox, QMessageBox
 
 from qt_test_helpers import APP, pump
-from test_extract_playback import opened_video
+from test_extract_playback import NATIVE, opened_video
+from test_video_marking_overlay import assert_crop_pixels, wait_for_visible_frame
 from controllers import video_editing_controller as editing
 from utils.image import ImageMarking, Marking
 from utils.sidecar import taggui_sidecar_path
@@ -177,6 +179,134 @@ def test_extraction_dialog_snapshots_crop_and_keeps_source(opened_video, monkeyp
         assert viewer.current_media.path == path and viewer.video_player.video_path == path
         assert viewer.current_media.crop == QRect(40, 50, 120, 80)
         assert viewer.video_player.is_playing and controls.get_loop_range() == (150, 222)
+        assert not messages and not errors
+    finally:
+        release.set()
+
+
+@pytest.mark.parametrize('delete_during_extraction', [False, True])
+def test_deleted_crop_stays_deleted_after_extraction(opened_video, monkeypatch, delete_during_extraction):
+    host, path, errors = opened_video
+    viewer, model = host.image_viewer, host.image_list_model
+    controls, controller = viewer.video_controls, host.video_editing_controller
+    controls.apply_loop_state(24, 71, False, save=True, emit_signals=True)
+    host.toggle_viewer_play_pause(viewer)
+    view, viewport = viewer.view, viewer.view.viewport()
+    if NATIVE:
+        host.move(host.screen().availableGeometry().topLeft())
+        pump(lambda: viewer.video_player._mpv_surface_active, seconds=15)
+        wait_for_visible_frame(viewer)
+
+    viewer.add_marking(ImageMarking.CROP)
+    start, end = view.mapFromScene(40, 40), view.mapFromScene(240, 180)
+    QTest.mousePress(viewport, Qt.LeftButton, pos=start)
+    APP.sendEvent(viewport, QMouseEvent(
+        QEvent.MouseMove, QPointF(end), QPointF(viewport.mapToGlobal(end)),
+        Qt.NoButton, Qt.LeftButton, Qt.NoModifier,
+    ))
+    QTest.mouseRelease(viewport, Qt.LeftButton, pos=end)
+    pump(lambda: viewer.current_media.crop is not None)
+    QTest.qWait(250)  # Deliver scene.changed and present the native foreground.
+    crop = QRect(viewer.current_media.crop)
+    sidecar = taggui_sidecar_path(path)
+    saved = json.loads(sidecar.read_text())
+    saved['caption_workspace'] = {'version': 1, 'entries': []}
+    saved['custom_metadata'] = {'keep': True}
+    sidecar.write_text(json.dumps(saved), encoding='UTF-8')
+    foreign = '{"version":1,"nodes":[],"state":{"lastNodeId":0}}'
+    path.with_suffix('.json').write_text(foreign, encoding='UTF-8')
+    if NATIVE:
+        assert_crop_pixels(viewer, path.parent / 'crop-before-delete.png')
+
+    def assert_deleted():
+        assert viewer.current_media.crop is None and viewer.crop_marking is None
+        assert not any(getattr(item, 'rect_type', None) == ImageMarking.CROP
+                       for item in viewer.scene.items())
+        metadata = json.loads(sidecar.read_text())
+        assert 'crop' not in metadata, 'Deleted crop remained in the saved sidecar'
+        assert metadata['caption_workspace'] == saved['caption_workspace']
+        assert metadata['custom_metadata'] == saved['custom_metadata']
+        assert path.with_suffix('.json').read_text() == foreign
+        if NATIVE:
+            pixels = wait_for_visible_frame(viewer)
+            bounds = view.mapFromScene(crop).boundingRect().adjusted(-5, -5, 5, 5)
+            bounds = bounds.intersected(pixels.rect())
+            assert not any(pixels.pixelColor(x, y).blue() > 200
+                           and pixels.pixelColor(x, y).red() < 60
+                           and pixels.pixelColor(x, y).green() < 60
+                           for y in range(bounds.top(), bounds.bottom() + 1)
+                           for x in range(bounds.left(), bounds.right() + 1))
+
+    def delete_crop():
+        viewer.scene.clearSelection()
+        viewer.crop_marking.setSelected(True)
+        QTest.keyClick(view, Qt.Key_Delete)
+        QTest.qWait(50)
+        assert_deleted()
+
+    if not delete_during_extraction:
+        delete_crop()
+        model.undo()
+        APP.processEvents()
+        assert viewer.current_media.crop == crop
+        assert json.loads(sidecar.read_text())['crop'] == list(crop.getRect())
+        model.redo()
+        APP.processEvents()
+        assert_deleted()
+
+    started, release = Event(), Event()
+    editor = editing._video_editor_class()
+    extract = editor.extract_range
+    calls, ready, messages = [], [], []
+
+    def delayed(*args, **kwargs):
+        calls.append(kwargs)
+        started.set()
+        assert release.wait(10)
+        return extract(*args, **kwargs)
+
+    def accept_dialog():
+        dialog = APP.activeModalWidget()
+        checkbox = next(box for box in dialog.findChildren(QCheckBox)
+                        if box.text().startswith('Apply current crop'))
+        assert checkbox.isEnabled() is delete_during_extraction
+        assert checkbox.isChecked() is delete_during_extraction
+        dialog.accept()
+
+    monkeypatch.setattr(editor, 'extract_range', delayed)
+    for name in ('information', 'warning', 'critical'):
+        monkeypatch.setattr(QMessageBox, name, lambda *args: messages.append(args[1:]))
+    model.ordered_view_ready.connect(ready.append)
+    QTimer.singleShot(0, host, accept_dialog)
+    try:
+        controller.extract_video_range()
+        assert started.wait(3)
+        if delete_during_extraction:
+            delete_crop()
+        release.set()
+        pump(lambda: not controller._video_operation_active and bool(ready), seconds=25)
+        QTest.qWait(500)
+        assert_deleted()
+        output = path.with_name('source_extract_24-71.mp4')
+        assert 'crop' not in json.loads(taggui_sidecar_path(output).read_text())
+        frames = decoded_frames(output)
+        assert len(frames) == 48
+        assert frames[0].shape[:2] == (
+            (crop.height() // 2 * 2, crop.width() // 2 * 2)
+            if delete_during_extraction else (240, 320))
+        assert (calls[0]['crop_rect'] is not None) is delete_during_extraction
+        assert viewer.video_player.video_path == path and viewer.video_player.is_playing
+        def select(media_path):
+            index = model.index(model.get_index_for_path(media_path), 0)
+            host.image_list.list_view.setCurrentIndex(host.proxy_image_list_model.mapFromSource(index))
+            pump(lambda: viewer.current_media is not None and viewer.current_media.path == media_path
+                 and viewer.video_player.video_path == media_path, seconds=15)
+            QTest.qWait(400)
+
+        select(output)
+        assert viewer.current_media.crop is None and viewer.crop_marking is None
+        select(path)
+        assert_deleted()
         assert not messages and not errors
     finally:
         release.set()
