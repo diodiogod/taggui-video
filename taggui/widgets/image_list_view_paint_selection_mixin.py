@@ -616,7 +616,7 @@ class ImageListViewPaintSelectionMixin:
         """Re-enable widget updates after model reset."""
         # Defer re-enabling updates to next event loop iteration
         # This ensures the view's internal state is fully updated before repainting
-        QTimer.singleShot(0, self._do_enable_updates)
+        QTimer.singleShot(0, self, self._do_enable_updates)
 
 
     def _do_enable_updates(self):

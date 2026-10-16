@@ -5,6 +5,18 @@ All notable changes to TagGUI Video 1M are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.6.22] - 2026-10-16
+
+### Added
+
+- Keep opening folders responsive
+- Prevent Explorer-launched TagGUI windows from freezing while scanning uncached folders.
+- Add responsive cancellation for folder scans and initial media indexing.
+- Keep the previous folder and saved session when a new folder scan is cancelled.
+
+### Changed
+
+- Improve window-close stability during pending browser layout updates.
 ## [1.6.21] - 2026-10-10
 
 ### Added

@@ -2808,7 +2808,7 @@ class MainWindow(QMainWindow):
             except Exception as e:
                 print(f"[RESTORE] Failed to restore image-list dock width: {e}")
 
-        QTimer.singleShot(max(0, int(delay_ms)), _apply)
+        QTimer.singleShot(max(0, int(delay_ms)), self, _apply)
 
     def _schedule_restore_right_dock_width(self, delay_ms: int = 0):
         """Reapply the saved right-dock width after startup/folder-load layout churn."""
@@ -2818,7 +2818,7 @@ class MainWindow(QMainWindow):
             except Exception as e:
                 print(f"[RESTORE] Failed to restore right dock width: {e}")
 
-        QTimer.singleShot(max(0, int(delay_ms)), _apply)
+        QTimer.singleShot(max(0, int(delay_ms)), self, _apply)
 
     def _save_folder_view_preferences(self, *,
                                       sort_value: str | None = None,
@@ -7718,6 +7718,15 @@ class MainWindow(QMainWindow):
                        select_path: str | None = None,
                        load_options: LimitedLoadOptions | None = None,
                        force_background_validation: bool = False):
+        if self.image_list_model._directory_load_in_progress:
+            return
+        previous_directory = self.directory_path
+        previous_options = self._current_directory_load_options
+        previous_restore_path = getattr(self, '_directory_restore_selection_path', None)
+        previous_model_view = {
+            name: getattr(self.image_list_model, name)
+            for name in ('_sort_field', '_sort_dir', '_media_type_sql')
+        }
         ui_load_started_at = time.perf_counter()
 
         def _log_ui_load_stage(label: str):
@@ -7726,7 +7735,7 @@ class MainWindow(QMainWindow):
 
         self._load_session_id += 1
         load_session_id = self._load_session_id
-        self.directory_path = path.resolve()
+        resolved_path = path.resolve()
         effective_load_options = load_options
         if (
             effective_load_options is None
@@ -7744,15 +7753,10 @@ class MainWindow(QMainWindow):
             if isinstance(effective_load_options, LimitedLoadOptions)
             else None
         )
-        if save_path_to_settings:
-            self._session_settings_set_value('directory_path', str(self.directory_path))
-            self._add_to_recent_directories(str(self.directory_path))
-        self._update_main_window_title()
-
         # Capture folder restore target before model/filter churn can emit
         # transient currentChanged signals and overwrite the saved selection.
         if not select_path and self._current_directory_load_options is None:
-            folder_saved_path = self._get_folder_last_selected_path(self.directory_path)
+            folder_saved_path = self._get_folder_last_selected_path(resolved_path)
             if folder_saved_path:
                 select_path = folder_saved_path
         self._directory_restore_selection_path = str(select_path) if select_path else None
@@ -7761,7 +7765,7 @@ class MainWindow(QMainWindow):
         # Replaying sort/media state after pagination starts can discard that
         # background request and synchronously rebuild up to three pages on the
         # UI thread, freezing the freshly shown window.
-        self._apply_folder_view_preferences(self.directory_path)
+        self._apply_folder_view_preferences(resolved_path)
         if self._current_directory_load_options is None:
             startup_sort = str(self.image_list.sort_combo_box.currentText() or 'Default')
             startup_sort_field, startup_sort_dir = self._ui_sort_to_db_sort(startup_sort)
@@ -7772,12 +7776,27 @@ class MainWindow(QMainWindow):
         )
         self.image_list_model.set_media_type_filter(startup_media_type)
 
-        self.image_list_model.load_directory(
+        loaded = self.image_list_model.load_directory(
             path,
             load_options=self._current_directory_load_options,
             force_background_validation=force_background_validation,
             validate_media_path=Path(select_path) if select_path else None,
         )
+        if loaded is False or self._main_window_closing:
+            self.directory_path = previous_directory
+            self._current_directory_load_options = previous_options
+            self._directory_restore_selection_path = previous_restore_path
+            for name, value in previous_model_view.items():
+                setattr(self.image_list_model, name, value)
+            if previous_directory is not None and not self._main_window_closing:
+                self._apply_folder_view_preferences(previous_directory)
+            self._update_main_window_title()
+            return
+        self.directory_path = resolved_path
+        self._update_main_window_title()
+        if save_path_to_settings:
+            self._session_settings_set_value('directory_path', str(self.directory_path))
+            self._add_to_recent_directories(str(self.directory_path))
         _log_ui_load_stage('model-bootstrap-returned')
         self.image_list.filter_line_edit.clear()
         # self.all_tags_editor.filter_line_edit.clear() # Keeping this
@@ -7991,10 +8010,10 @@ class MainWindow(QMainWindow):
 
         # Startup restore should begin immediately; waiting for bootstrap
         # layout just delays far-page loading on large datasets.
-        QTimer.singleShot(0, do_scroll)
+        QTimer.singleShot(0, self, do_scroll)
 
         # Fallback timeout in case layout_ready doesn't fire (e.g., grid layout)
-        QTimer.singleShot(2000, do_scroll)
+        QTimer.singleShot(2000, self, do_scroll)
 
         # Set focus to image list so arrow keys work immediately
         self.image_list.list_view.setFocus()

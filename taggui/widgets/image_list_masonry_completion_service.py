@@ -829,7 +829,7 @@ class MasonryCompletionService:
                         model_for_resume = v.model().sourceModel() if v.model() and hasattr(v.model(), 'sourceModel') else v.model()
                         if model_for_resume and hasattr(model_for_resume, '_enrichment_paused'):
                             model_for_resume._enrichment_paused.clear()
-                    QTimer.singleShot(200, resume_enrichment_delayed)
+                    QTimer.singleShot(200, v, resume_enrichment_delayed)
 
                 except Exception as e:
                     print(f"[MASONRY] UI update crashed: {e}")
@@ -837,7 +837,7 @@ class MasonryCompletionService:
                     if model_for_error and hasattr(model_for_error, '_enrichment_paused'):
                         model_for_error._enrichment_paused.clear()
 
-            QTimer.singleShot(0, apply_and_signal)
+            QTimer.singleShot(0, v, apply_and_signal)
 
             if not v._preload_complete:
                 v._idle_preload_timer.start(100)

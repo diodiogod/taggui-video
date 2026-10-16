@@ -70,6 +70,9 @@ from utils.text_transform import TextTransformOptions, transform_text
 from utils.thumbnail_cache import get_thumbnail_cache
 from utils.media_file_lock import synchronized_media_file
 from utils.latest_task import LatestTask
+from utils.background_progress import (
+    BackgroundOperationCancelled, check_cancelled, run_background_operation,
+)
 from utils.load_options import LimitedLoadOptions
 from utils.search_text import contains_pattern, tag_pattern, palette_pattern
 from utils.utils import get_confirmation_dialog_reply, pluralize
@@ -755,7 +758,7 @@ def get_file_paths(directory_path: Path, progress_callback=None) -> set[Path]:
     return file_paths
 
 
-def get_directory_tree_stats(directory_path: Path, progress_callback=None) -> tuple[int, float]:
+def get_directory_tree_stats(directory_path: Path, progress_callback=None, *, cancelled=None) -> tuple[int, float]:
     """
     Fast recursive filesystem stats for cache freshness checks.
 
@@ -776,10 +779,12 @@ def get_directory_tree_stats(directory_path: Path, progress_callback=None) -> tu
         pass
 
     while stack:
+        check_cancelled(cancelled)
         current = stack.pop()
         try:
             with os.scandir(current) as entries:
                 for entry in entries:
+                    check_cancelled(cancelled)
                     if _should_skip_internal_dir_name(entry.name) and entry.is_dir(follow_symlinks=False):
                         continue
                     try:
@@ -1031,6 +1036,7 @@ def repair_extensionless_image_path(
     rel_path: str | None = None,
     stat_result=None,
     repair_cache: dict[str, dict[str, dict[str, float | int | str]]] | None = None,
+    *, cancelled=None,
 ) -> Path:
     """Rename an image with a missing/bogus suffix to its detected suffix."""
     cache_key = _normalize_relative_path(rel_path) if rel_path else None
@@ -1056,7 +1062,9 @@ def repair_extensionless_image_path(
     ):
         return path
 
+    check_cancelled(cancelled)
     detected_suffix = _detect_extensionless_image_suffix(path)
+    check_cancelled(cancelled)
     if detected_suffix is None:
         if cache_key and stat_result is not None and non_image_cache is not None:
             try:
@@ -1189,6 +1197,7 @@ def scan_directory_snapshot(
     directory_path: Path,
     progress_callback=None,
     repair_extensionless_images: bool = False,
+    *, cancelled=None,
 ) -> tuple[set[Path], tuple[int, float], dict[str, float]]:
     """
     Scan the full tree once and return:
@@ -1213,6 +1222,7 @@ def scan_directory_snapshot(
     print(f"[SCAN] Scanning directory: {directory_path}")
 
     while stack:
+        check_cancelled(cancelled)
         current_path, rel_dir = stack.pop()
 
         try:
@@ -1229,6 +1239,7 @@ def scan_directory_snapshot(
         try:
             with os.scandir(current_path) as entries:
                 for entry in entries:
+                    check_cancelled(cancelled)
                     if _should_skip_internal_dir_name(entry.name) and entry.is_dir(follow_symlinks=False):
                         continue
                     try:
@@ -1258,12 +1269,13 @@ def scan_directory_snapshot(
                                 rel_path=_relative_child_path(rel_dir, entry.name),
                                 stat_result=entry_stat,
                                 repair_cache=extensionless_repair_cache,
+                                cancelled=cancelled,
                             )
                         if _is_legacy_repair_artifact(file_path):
                             continue
                         file_paths.add(file_path)
                         file_count += 1
-                        if progress_callback and file_count % 20000 == 0:
+                        if progress_callback and file_count % 256 == 0:
                             try:
                                 progress_callback(file_count)
                             except Exception:
@@ -1281,6 +1293,7 @@ def scan_directory_snapshot(
         except Exception:
             pass
 
+    check_cancelled(cancelled)
     if repair_extensionless_images:
         _save_extensionless_repair_cache(
             directory_path,
@@ -1289,6 +1302,57 @@ def scan_directory_snapshot(
         _print_extensionless_image_repair_summary(directory_path)
     print(f"[SCAN] Scan complete: {file_count:,} total files found")
     return file_paths, (file_count, max_mtime), dir_mtimes
+
+
+def _prepare_directory_files(directory_path, cached_count, image_suffixes,
+                             repair_extensions, pagination_threshold,
+                             update, cancelled):
+    """Discover files and populate the index using a private worker connection."""
+    db = ImageIndexDB(directory_path)
+    try:
+        file_paths = None
+        cache_stats = dir_mtimes = None
+        if cached_count > 1000:
+            update('Checking folder changes...')
+            fs_count, fs_mtime = get_directory_tree_stats(
+                directory_path,
+                progress_callback=lambda count: update('Checking folder changes...', count),
+                cancelled=cancelled,
+            )
+            try:
+                saved_count = int(db.get_meta_value('path_cache_file_count'))
+                saved_mtime = float(db.get_meta_value('path_cache_tree_mtime'))
+            except (TypeError, ValueError):
+                saved_count = saved_mtime = None
+            if saved_count == fs_count and saved_mtime is not None and fs_mtime <= saved_mtime + .001:
+                file_paths = {directory_path / path for path in db.get_all_paths()}
+        if file_paths is None:
+            update('Scanning folder files...')
+            file_paths, cache_stats, dir_mtimes = scan_directory_snapshot(
+                directory_path,
+                progress_callback=lambda count: update('Scanning folder files...', count),
+                repair_extensionless_images=repair_extensions,
+                cancelled=cancelled,
+            )
+        check_cancelled(cancelled)
+        image_paths = [path for path in file_paths if path.suffix.lower() in image_suffixes]
+        indexed = len(image_paths) >= pagination_threshold
+        if indexed:
+            update('Indexing media...', 0, len(image_paths))
+            db.bulk_insert_files(
+                image_paths, directory_path,
+                progress_callback=lambda count, total: update('Indexing media...', count, total),
+                cancelled=cancelled,
+            )
+        check_cancelled(cancelled)
+        if cache_stats is not None:
+            db.set_meta_value('path_cache_file_count', str(int(cache_stats[0])))
+            db.set_meta_value('path_cache_tree_mtime', f'{float(cache_stats[1]):.6f}')
+            db.set_meta_value('path_cache_updated_at', f'{time.time():.6f}')
+            db.replace_directory_signatures(dir_mtimes)
+        return file_paths, indexed
+    finally:
+        db.close()
 
 
 def get_changed_directory_roots(
@@ -2525,6 +2589,7 @@ class ImageListModel(QAbstractListModel):
 
         # Pagination mode state
         self._paginated_mode = False
+        self._directory_load_in_progress = False
         self._total_count = 0  # Total images in paginated mode
         self._pages: dict = {}  # page_num -> list[Image]
         self._page_load_order: list = []  # LRU tracking
@@ -7410,32 +7475,36 @@ class ImageListModel(QAbstractListModel):
         from PySide6.QtCore import Qt
         from utils.settings import settings, DEFAULT_SETTINGS
 
-        self._view_prepare_task.cancel()
-        self._view_prepare_owner = None
-        # DON'T call beginResetModel() here - it clears the view immediately
-        # Load all metadata first, THEN reset the model (keeps old images visible during loading)
+        if self._directory_load_in_progress:
+            return False
         error_messages: list[str] = []
-        new_images = []  # Build new image list without clearing old one
+        new_images = []
         normalized_load_options = _normalize_limited_load_options(load_options)
-        self._active_load_options = normalized_load_options
-        # A folder load starts with the UI's empty text filter. Clear any SQL
-        # text predicate left by the previous folder before page zero is queued;
-        # otherwise the subsequent UI reset has to rebuild the page again.
-        self._text_filter_sql = ''
-        self._text_filter_bindings = ()
-        self._set_scope_from_rel_paths(None)
-        if normalized_load_options is not None:
-            print(f"[LIMIT] Requested limited folder view: {normalized_load_options.describe()}")
-            self._sort_field = normalized_load_options.db_sort_field
-            self._sort_dir = normalized_load_options.sort_dir
-        self._directory_path = directory_path
-        with self._sidecar_meta_cache_lock:
-            self._sidecar_meta_cache.clear()
-        self._path_validation_generation += 1
-        load_generation = self._path_validation_generation
-        with self._path_validation_lock:
-            self._pending_path_validation_result = None
-        self._close_background_validation_progress()
+        load_generation = None
+
+        def commit_load_state():
+            nonlocal load_generation
+            # Until discovery succeeds, old pages and refresh callbacks still
+            # belong to the displayed folder. Cancellation leaves that owner
+            # intact, rather than exposing old rows with the new folder path.
+            self._view_prepare_task.cancel()
+            self._view_prepare_owner = None
+            self._active_load_options = normalized_load_options
+            self._text_filter_sql = ''
+            self._text_filter_bindings = ()
+            self._set_scope_from_rel_paths(None)
+            if normalized_load_options is not None:
+                print(f"[LIMIT] Requested limited folder view: {normalized_load_options.describe()}")
+                self._sort_field = normalized_load_options.db_sort_field
+                self._sort_dir = normalized_load_options.sort_dir
+            self._directory_path = directory_path
+            with self._sidecar_meta_cache_lock:
+                self._sidecar_meta_cache.clear()
+            self._path_validation_generation += 1
+            load_generation = self._path_validation_generation
+            with self._path_validation_lock:
+                self._pending_path_validation_result = None
+            self._close_background_validation_progress()
 
         # Try to load file paths from DB cache first (much faster for large folders)
         from utils.image_index_db import ImageIndexDB
@@ -7446,9 +7515,6 @@ class ImageListModel(QAbstractListModel):
         cached_count = int(db.count() or 0)
         cached_paths = None
         stored_dir_mtimes = db.get_directory_signatures()
-        cache_stats = None
-        dir_mtimes = None
-        scan_progress = None
 
         pagination_threshold = settings.value(
             'pagination_threshold',
@@ -7504,35 +7570,6 @@ class ImageListModel(QAbstractListModel):
             else:
                 _start_validation()
 
-        def _ensure_scan_progress():
-            nonlocal scan_progress
-            if scan_progress is not None:
-                return scan_progress
-            scan_progress = QProgressDialog("Scanning folder...", "", 0, 0)
-            scan_progress.setWindowTitle("Scanning Folder")
-            scan_progress.setWindowModality(Qt.WindowModal)
-            scan_progress.setCancelButton(None)
-            scan_progress.setMinimumDuration(0)
-            scan_progress.setAutoClose(False)
-            scan_progress.setAutoReset(False)
-            scan_progress.show()
-            QApplication.processEvents()
-            return scan_progress
-
-        def _update_scan_progress(label: str, count: int = None, maximum: int = None):
-            dialog = _ensure_scan_progress()
-            if maximum is None:
-                dialog.setRange(0, 0)
-            else:
-                dialog.setRange(0, max(1, int(maximum)))
-                if count is not None:
-                    dialog.setValue(max(0, min(int(count), dialog.maximum())))
-            if count is None:
-                dialog.setLabelText(label)
-            else:
-                dialog.setLabelText(f"{label}\nFiles: {int(count):,}")
-            QApplication.processEvents()
-
         precomputed_count = len(precomputed_rel_paths) if precomputed_rel_paths is not None else None
         if normalized_load_options is not None and precomputed_rel_paths is not None:
             limited_precomputed_rel_paths = db.get_limited_paths(normalized_load_options)
@@ -7568,6 +7605,7 @@ class ImageListModel(QAbstractListModel):
         if paginated_from_precomputed:
             print(f"[CACHE] Reusing precomputed index for {precomputed_count:,} files")
             db.close()
+            commit_load_state()
             self._load_directory_paginated(
                 directory_path,
                 image_paths=None,
@@ -7607,6 +7645,7 @@ class ImageListModel(QAbstractListModel):
         ):
             print(f"[CACHE] Using {effective_cached_count:,} cached file paths (background validation scheduled)")
             db.close()
+            commit_load_state()
             self._load_directory_paginated(
                 directory_path,
                 image_paths=None,
@@ -7627,83 +7666,31 @@ class ImageListModel(QAbstractListModel):
             _schedule_background_validation(delay_ms=validation_delay_ms)
             return
 
-        try:
-            if precomputed_rel_paths is not None:
-                file_paths = {directory_path / rel_path for rel_path in precomputed_rel_paths}
-            elif cached_count > 1000:
-                cached_paths = db.get_all_paths()
-                _update_scan_progress("Checking folder changes...")
-                fs_count, fs_tree_mtime = get_directory_tree_stats(
-                    directory_path,
-                    progress_callback=lambda c: _update_scan_progress(
-                        "Checking folder changes...",
-                        count=c,
+        if precomputed_rel_paths is not None:
+            file_paths = {directory_path / rel_path for rel_path in precomputed_rel_paths}
+        else:
+            # Discovery, extension repair and bulk stat/index work must not run
+            # in the GUI thread. Keep the load API synchronous via Qt's modal
+            # event loop, with no worker join when the user cancels a slow read.
+            db.close()
+            self._directory_load_in_progress = True
+            try:
+                file_paths, indexed = run_background_operation(
+                    lambda update, cancelled: _prepare_directory_files(
+                        directory_path, cached_count, set(image_suffixes),
+                        repair_extensionless_images, threshold_value, update, cancelled,
                     ),
+                    title='Scanning Folder', label='Scanning folder files...',
+                    should_cancel=lambda: self._shutdown_requested,
                 )
+                db_synced = db_synced or indexed
+            except BackgroundOperationCancelled:
+                return False
+            finally:
+                self._directory_load_in_progress = False
+            db = ImageIndexDB(directory_path)
 
-                saved_count_raw = db.get_meta_value('path_cache_file_count')
-                saved_tree_mtime_raw = db.get_meta_value('path_cache_tree_mtime')
-
-                try:
-                    saved_count = int(saved_count_raw) if saved_count_raw is not None else None
-                except (TypeError, ValueError):
-                    saved_count = None
-                try:
-                    saved_tree_mtime = float(saved_tree_mtime_raw) if saved_tree_mtime_raw is not None else None
-                except (TypeError, ValueError):
-                    saved_tree_mtime = None
-
-                stale_reasons = []
-                if saved_count is None or saved_tree_mtime is None:
-                    stale_reasons.append("missing signature")
-                else:
-                    if saved_count != fs_count:
-                        stale_reasons.append(f"count {saved_count:,}->{fs_count:,}")
-                    if fs_tree_mtime > (saved_tree_mtime + 0.001):
-                        stale_reasons.append("tree-mtime changed")
-
-                if stale_reasons:
-                    reason_text = ", ".join(stale_reasons)
-                    print(f"[CACHE] Path cache stale ({reason_text}), rescanning filesystem")
-                    _update_scan_progress("Rescanning folder files...")
-                    file_paths, cache_stats, dir_mtimes = scan_directory_snapshot(
-                        directory_path,
-                        progress_callback=lambda c: _update_scan_progress(
-                            "Rescanning folder files...",
-                            count=c,
-                        ),
-                        repair_extensionless_images=repair_extensionless_images,
-                    )
-                else:
-                    print(f"[CACHE] Using {cached_count:,} cached file paths (skipping scan)")
-                    file_paths = {directory_path / rel_path for rel_path in cached_paths}
-            else:
-                # Full scan needed (first time or small folder)
-                _update_scan_progress("Scanning folder files...")
-                file_paths, cache_stats, dir_mtimes = scan_directory_snapshot(
-                    directory_path,
-                    progress_callback=lambda c: _update_scan_progress(
-                        "Scanning folder files...",
-                        count=c,
-                    ),
-                    repair_extensionless_images=repair_extensionless_images,
-                )
-
-            # Persist signatures only when a real filesystem scan just ran.
-            if cache_stats is not None:
-                try:
-                    db.set_meta_value('path_cache_file_count', str(int(cache_stats[0])))
-                    db.set_meta_value('path_cache_tree_mtime', f"{float(cache_stats[1]):.6f}")
-                    db.set_meta_value('path_cache_updated_at', f"{time.time():.6f}")
-                    if dir_mtimes is not None:
-                        db.replace_directory_signatures(dir_mtimes)
-                except Exception:
-                    pass
-        finally:
-            if scan_progress is not None:
-                scan_progress.close()
-                scan_progress.deleteLater()
-                scan_progress = None
+        commit_load_state()
 
         if normalized_load_options is not None:
             limited_rel_paths = []

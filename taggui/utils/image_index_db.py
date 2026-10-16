@@ -19,6 +19,7 @@ from utils.review_marks import (
     normalize_review_state,
 )
 from utils.settings import settings, DEFAULT_SETTINGS
+from utils.background_progress import check_cancelled
 from utils.sqlite_batches import execute_insert_batches
 from utils.sidecar import preferred_taggui_sidecar_read_path, read_taggui_metadata
 from utils.load_options import LimitedLoadOptions
@@ -1252,7 +1253,7 @@ class ImageIndexDB:
                 return
 
     def bulk_insert_files(self, file_paths: List[Path], directory_path: Path,
-                          progress_callback=None):
+                          progress_callback=None, *, cancelled=None):
         """
         Bulk insert initial file records into the database.
         Used when initializing large folders to ensure DB has records for pagination.
@@ -1277,6 +1278,7 @@ class ImageIndexDB:
         new_files_count = 0
         total_files = len(file_paths)
         for i, path in enumerate(file_paths):
+             check_cancelled(cancelled)
              try:
                  rel_path = str(path.relative_to(directory_path))
              except ValueError:
@@ -1293,6 +1295,7 @@ class ImageIndexDB:
              except (OSError, FileNotFoundError):
                  continue
 
+             check_cancelled(cancelled)
              suffix = path.suffix.lower()
              is_video = suffix in ['.mp4', '.avi', '.mov', '.mkv', '.webm']
              file_type = suffix.lstrip('.') if suffix else ''
