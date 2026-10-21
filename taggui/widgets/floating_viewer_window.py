@@ -15,6 +15,7 @@ from utils.review_marks import (
     get_review_badge_text_color,
 )
 from utils.settings import DEFAULT_SETTINGS, settings
+from widgets.wall_geometry_interaction import WallGeometryInteraction
 
 
 class FloatingReviewSlotsOverlay(QWidget):
@@ -451,7 +452,7 @@ class ShiftResizeCornerCue(QWidget):
         )
 
 
-class FloatingViewerWindow(QWidget):
+class FloatingViewerWindow(WallGeometryInteraction, QWidget):
     """Minimal floating window that hosts one ImageViewer instance."""
 
     activated = Signal(object)  # Emits hosted viewer
@@ -475,6 +476,7 @@ class FloatingViewerWindow(QWidget):
             | Qt.WindowType.FramelessWindowHint,
         )
         self.viewer = viewer
+        self._space_move_active = bool(getattr(parent, '_floating_space_move_active', False))
         self._window_drag_active = False
         self._window_drag_button = Qt.MouseButton.NoButton
         self._window_drag_offset = QPoint()
@@ -568,6 +570,8 @@ class FloatingViewerWindow(QWidget):
 
         self.viewer.installEventFilter(self)
         self.installEventFilter(self)
+        self._close_button.installEventFilter(self)
+        self._review_slots_overlay.installEventFilter(self)
         self._video_controls_widget = getattr(self.viewer, "video_controls", None)
         self._install_hosted_viewer_event_filters()
         if hasattr(self.viewer, "activated"):
@@ -889,6 +893,7 @@ class FloatingViewerWindow(QWidget):
         return True
 
     def _begin_window_drag(self, event, handle_name: str | None):
+        self._begin_wall_geometry_gesture(event)
         global_pos = self._event_global_pos(event)
         drag_button = Qt.MouseButton.LeftButton
         try:
@@ -902,7 +907,7 @@ class FloatingViewerWindow(QWidget):
         self._window_drag_offset = global_pos - self.frameGeometry().topLeft()
         self._emit_activated()
         self._update_overlay_hover_from_global_pos(global_pos)
-        if not self._compare_drag_signal_active:
+        if not self._compare_drag_signal_active and not self._wall_skip_reflow:
             self._compare_drag_signal_active = True
             self.compare_drag_started.emit(self, global_pos)
 
@@ -1370,8 +1375,17 @@ class FloatingViewerWindow(QWidget):
             else:
                 overlay.set_hover_active(False)
 
+    def set_space_move_active(self, active: bool):
+        """Reserve the floating surface for moving while Space is held."""
+        active = bool(active)
+        if self._space_move_active == active:
+            return
+        self._space_move_active = active
+        if not self._frozen_passthrough_mode:
+            self._update_overlay_hover_from_global_pos(QCursor.pos())
+
     def _show_close_button(self, visible: bool):
-        if visible:
+        if visible and not self._space_move_active and not self._window_drag_active:
             self._close_button.show()
         else:
             self._close_button.hide()
@@ -1549,6 +1563,9 @@ class FloatingViewerWindow(QWidget):
                 wall_controls_action.setChecked(wall_controls_checked)
         if callable(arrange_windows):
             arrange_action = menu.addAction("Arrange as Masonry Wall")
+        controller = getattr(parent, '_wall_layout', None)
+        if controller is not None and bool(getattr(self, '_selection_masonry_wall_window', False)):
+            controller.add_menu(menu, self)
         close_all_action = menu.addAction("Close all spawned viewers")
         selected = menu.exec(global_pos)
         if exit_compare_action is not None and selected is exit_compare_action:
@@ -1747,6 +1764,7 @@ class FloatingViewerWindow(QWidget):
             self._resize_prev_anchor = None
 
     def _begin_window_resize(self, event, zone_name: str):
+        self._begin_wall_geometry_gesture(event)
         if self._window_drag_active:
             self._cancel_compare_drag_signal()
         self._resize_active = True
@@ -1776,7 +1794,8 @@ class FloatingViewerWindow(QWidget):
         self._emit_activated()
         self._update_shift_resize_visuals(self._resize_start_global_pos)
 
-    def _end_window_resize(self, event=None):
+    def _end_window_resize(self, event=None, *, commit=True):
+        was_active = self._resize_active
         self._resize_active = False
         self._resize_corner = None
         self._set_view_resize_anchor_for_window_resize(False)
@@ -1784,9 +1803,13 @@ class FloatingViewerWindow(QWidget):
             self._update_overlay_hover_from_global_pos(self._event_global_pos(event))
         else:
             self._update_shift_resize_visuals(QCursor.pos())
+        if was_active:
+            self._finish_wall_resize(self._resize_start_geometry, event, commit=commit)
 
     def _resize_zone_from_local_pos(self, local_pos: QPoint):
         """Return resize zone name from a local position near window borders."""
+        if self._space_move_active:
+            return None
         margin = 12
         x = local_pos.x()
         y = local_pos.y()
@@ -1829,6 +1852,10 @@ class FloatingViewerWindow(QWidget):
         return None
 
     def eventFilter(self, watched, event):
+        if self._resize_active or self._window_drag_active:
+            self._track_wall_geometry_gesture(event)
+            if getattr(self, '_wall_skip_reflow', False):
+                self._cancel_compare_drag_signal()
         self._refresh_video_surface_event_filters()
         event_type = event.type()
         if event_type in (
@@ -1843,6 +1870,32 @@ class FloatingViewerWindow(QWidget):
                 self._end_window_resize()
             if self._window_drag_active and not self._window_drag_button_still_down():
                 self._finish_window_drag()
+        # Space must win over close/resize/seek/review hit targets, even when
+        # the entire tiny window lies inside those targets. Finish the move
+        # normally if Space is released before the mouse button.
+        if isinstance(watched, QWidget) and (watched is self or self.isAncestorOf(watched)):
+            if (
+                self._space_move_active
+                and not self._frozen_passthrough_mode
+                and event_type == QEvent.Type.MouseButtonPress
+                and event.button() in (Qt.MouseButton.LeftButton, Qt.MouseButton.MiddleButton)
+            ):
+                self._begin_window_drag(event, None)
+                return True
+            if event_type == QEvent.Type.MouseMove and self._is_window_drag_button_down(event):
+                global_pos = self._event_global_pos(event)
+                self.move(global_pos - self._window_drag_offset)
+                self._update_overlay_hover_from_global_pos(global_pos)
+                if self._compare_drag_signal_active:
+                    self.compare_drag_moved.emit(self, global_pos)
+                return True
+            if (
+                self._window_drag_active
+                and event_type == QEvent.Type.MouseButtonRelease
+                and event.button() == self._window_drag_button
+            ):
+                self._finish_window_drag(self._event_global_pos(event))
+                return True
         overlay = getattr(self, "_review_slots_overlay", None)
         if overlay is not None:
             try:
@@ -1909,20 +1962,6 @@ class FloatingViewerWindow(QWidget):
                 if self._is_handle_blocked_by_controls(handle_name):
                     return True
                 self._begin_window_drag(event, handle_name)
-                return True
-            if (event.type() == QEvent.Type.MouseMove and self._is_window_drag_button_down(event)):
-                global_pos = self._event_global_pos(event)
-                self.move(global_pos - self._window_drag_offset)
-                self._update_overlay_hover_from_global_pos(global_pos)
-                if self._compare_drag_signal_active:
-                    self.compare_drag_moved.emit(self, global_pos)
-                return True
-            if (
-                event.type() == QEvent.Type.MouseButtonRelease
-                and self._window_drag_active
-                and event.button() == self._window_drag_button
-            ):
-                self._finish_window_drag(self._event_global_pos(event))
                 return True
             if event.type() == QEvent.Type.Enter:
                 self._show_drag_handle(handle_name, True)
@@ -2050,12 +2089,6 @@ class FloatingViewerWindow(QWidget):
                             self._force_activate_viewer_owner()
                     except Exception:
                         pass
-                if self._is_window_drag_button_down(event):
-                    self.move(event_global - self._window_drag_offset)
-                    self._update_overlay_hover_from_global_pos(event_global)
-                    if self._compare_drag_signal_active:
-                        self.compare_drag_moved.emit(self, event_global)
-                    return True
                 try:
                     local_pos = self.mapFromGlobal(event_global)
                     zone_name = self._resize_zone_from_local_pos(local_pos)
@@ -2086,9 +2119,6 @@ class FloatingViewerWindow(QWidget):
                             watched.unsetCursor()
                     except Exception:
                         pass
-                    return True
-                if self._window_drag_active and event.button() == self._window_drag_button:
-                    self._finish_window_drag(self._event_global_pos(event))
                     return True
             elif event.type() == QEvent.Type.FocusIn:
                 self._emit_activated()
@@ -2135,7 +2165,7 @@ class FloatingViewerWindow(QWidget):
 
     def closeEvent(self, event):
         if self._resize_active:
-            self._end_window_resize()
+            self._end_window_resize(commit=False)
         self._shift_resize_glow_timer.stop()
         self._cancel_compare_drag_signal()
         self.closing.emit(self.viewer)

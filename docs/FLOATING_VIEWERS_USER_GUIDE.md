@@ -34,6 +34,7 @@ Spawn actions are blocked while the main viewer is in fullscreen mode.
 ## Move, Resize, Close
 
 - Move window with `middle-click + drag` anywhere inside a floating viewer.
+- Hold `Space` and left-drag to move a floating viewer, including very tiny windows. The close button stays hidden until Space and the drag are released.
 - If media is fully fit and not pannable, `left-drag` moves the floating window.
 - If media is zoomed/pannable, `left-drag` pans media instead; use white edge handles or middle-drag to move window.
 - Resize from all corners and all borders (drag edge/corner zones).
@@ -42,6 +43,9 @@ Spawn actions are blocked while the main viewer is in fullscreen mode.
 - `Arrange as Masonry Wall` and `Open in Masonry Wall` both use the shared spacing from `Settings -> Advanced -> Floating masonry wall gap (px)`, including the screen-edge inset.
 - Both masonry flows use `Settings -> Advanced -> Floating masonry alignment`.
 - `Arrange as Masonry Wall` uses the default rearrange order from `Settings -> Advanced -> Rearrange preserves screen order`.
+- Wall packing, automatic sizing, and resize reflow are configurable in `Settings -> Advanced -> Floating Wall Layout` and the wall right-click menu.
+- Hold `Alt` to skip resize reflow for one gesture. `Ctrl+Alt+M` toggles Manual Wall Layout until toggled again; the shortcut is configurable.
+- Manually resized sizes are kept by default. The wall menu can release one kept size or reset all kept sizes. See [Packing and Automatic Reflow](MASONRY_REVIEW_WALL_GUIDE.md#packing-and-automatic-reflow).
 - Right-click a Masonry Wall window and toggle `Masonry wall controls` live.
 - `Open in Masonry Wall` starts with the wall controls on.
 - `Arrange as Masonry Wall` starts with the wall controls off.

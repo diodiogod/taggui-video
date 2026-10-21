@@ -44,6 +44,83 @@ Single-item spawn is still available. The masonry wall is for multi-item review.
 - Keep the main window available while using floating viewers for decisions.
 - Mark picks and rejects without leaving the comparison workflow.
 
+## Packing and Automatic Reflow
+
+`Settings -> Advanced -> Floating Wall Layout` controls the layout. The same live
+options are available under `View -> Wall layout` and by right-clicking a wall
+window and opening `Wall layout`.
+
+| Option | Default | Behavior |
+| --- | --- | --- |
+| Packing algorithm | Best fit | Compare masonry and MaxRects candidates and use the largest feasible window area. |
+| Reflow after resizing | On | Repack after the mouse is released. Moving a window alone does not repack. |
+| Automatically size other windows | On | Resize windows without kept sizes to fit, preserving their current proportions. Off means positions only. |
+| Preserve manually resized sizes | On | Remember each manually resized window's exact size for subsequent repacks. |
+| Manual layout shortcut | Ctrl+Alt+M | Suspend automatic rearrangement until toggled again. Configurable in Settings. |
+
+The illustrations below use simplified media windows. They show the behavior of
+the controls; their positions are examples rather than exact packing results.
+
+The algorithm can also be set to `Masonry` or `MaxRects`. The right-click menu's
+`Packing algorithm (this session)` overrides the saved default without changing
+it. Choose `Use settings` to return to the saved algorithm. Changing the session
+algorithm repacks the current wall unless Manual Wall Layout is active.
+
+MaxRects packs rectangles without rotating the media. Best fit uses heuristics;
+it does not guarantee a mathematically optimal arrangement. Older installations
+without `rectpack` fall back to masonry; the normal requirements installation
+includes the dependency.
+
+Opening a new wall always chooses initial sizes from the media proportions.
+Subsequent repacks use the current window shapes. The existing
+`Floating resize keeps aspect ratio by default` setting and Shift override still
+control manual resizing. Media itself retains its existing fit/zoom behavior.
+
+For example, resize the first of ten windows and release the mouse: its chosen
+size is kept while the others are arranged around it. Resize a second and third
+window and their sizes are kept too. The windows may move during a repack.
+Use `Keep this window's size` to explicitly keep or release one window's size,
+or `Reset kept sizes and fit wall` to release all kept sizes and fit again.
+Explicitly kept sizes remain respected even when automatic preservation of
+manual resizes is disabled. Size choices last for the lifetime of each window.
+
+![Three stages: begin with a wall, resize landscape window A, then release the mouse. A keeps its enlarged size while the other windows may move or resize, retaining their proportions.](../images/guides/wall-resize-reflow.png)
+
+*The amber outline marks the window you resize. The lock marks its kept size.*
+
+With automatic sizing off, packing only changes positions. It cannot increase
+the windows' combined area. If the sizes do not fit, the current geometry is left
+in place and a temporary tooltip explains how to enable sizing or release kept
+sizes. The message does not add a status-bar row or reduce the viewer area.
+
+![Automatic sizing comparison: when on, unkept windows may move and resize; when off, all current window sizes stay fixed and only positions change. Kept window A is the same size in both examples.](../images/guides/wall-sizing-options.png)
+
+*Automatic sizing applies to windows without kept sizes. Both modes preserve
+window proportions; fixed sizes cannot always be made to fit.*
+
+`Preserve screen order when repacking` uses the existing saved rearrange-order
+preference. It keeps the current top-to-bottom, left-to-right order, which can
+leave less room for packing. Disable it to allow more rearrangement.
+
+## Manual Control
+
+![Manual controls: hold Alt while dragging to bypass automatic reflow for one gesture, or toggle Manual Wall Layout with the configurable Ctrl+Alt+M shortcut to make several adjustments.](../images/guides/wall-manual-controls.png)
+
+- Hold **Alt** during a resize to skip automatic reflow for that gesture. Releasing
+  Alt before the mouse still skips that gesture's reflow. Its new size is remembered.
+- Alt-drag also suppresses the floating-window compare-merge gesture.
+- Toggle **Manual Wall Layout** with **Ctrl+Alt+M**, or from the Wall layout menu,
+  to make several manual adjustments. This also works for walls opened together.
+- Resuming automatic layout takes effect on the next resize; it does not immediately
+  rearrange the wall. `Repack current wall` explicitly repacks even in manual mode.
+- Automatic reflow preserves playback, synchronization, wall controls, and the
+  viewer's fit/custom-zoom state. A new gesture, setting change, close, or manual-mode
+  toggle cancels an older pending layout result.
+
+Layout calculations for resize reflow run in a worker using only geometry. They
+do not reload media or restart the wall. Initial opening and the explicit
+`Arrange as Masonry Wall` command retain their synchronous layout calculation.
+
 ## Review Badges
 
 Review badges are item-level marks stored separately from normal tags.
@@ -123,3 +200,7 @@ The exact mappings may differ if you customized them in `Settings -> Badges`.
 - [Compare Guide](COMPARE_GUIDE.md)
 - [Filtering Guide](FILTERING_GUIDE.md)
 - [Shortcuts](SHORTCUTS.md)
+
+The illustrations have editable SVG sources beside their PNG exports in
+`images/guides/`. Rebuild them with
+`venv/Scripts/python.exe scripts/render_wall_guide_illustrations.py`.

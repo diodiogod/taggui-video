@@ -59,6 +59,11 @@ DEFAULT_SETTINGS = {
     'floating_viewer_wall_gap_px': 6,  # Shared gap between floating windows and screen edges for masonry layouts
     'floating_viewer_wall_alignment': 'Top center',
     'floating_viewer_rearrange_preserve_screen_order': True,
+    'floating_wall_algorithm': 'Best fit',
+    'floating_wall_reflow_after_resize': True,
+    'floating_wall_automatic_sizing': True,
+    'floating_wall_preserve_manual_sizes': True,
+    'floating_wall_manual_shortcut': 'Ctrl+Alt+M',
     'floating_double_click_detail_zoom_percent': 400,  # 400% => 4x fallback zoom on floating double-click detail jump
     'floating_resize_preserve_aspect_by_default': False,
     'floating_viewer_hold_opacity': 46,  # Hold mode opacity in percent (0 = fully transparent, 100 = fully opaque)

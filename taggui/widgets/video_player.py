@@ -2,6 +2,7 @@ import os
 import sys
 import time
 import weakref
+from contextlib import contextmanager
 # These are read when OpenCV is imported lazily for frame-accurate fallback.
 os.environ['OPENCV_FFMPEG_LOGLEVEL'] = '-8'
 os.environ['OPENCV_LOG_LEVEL'] = 'SILENT'
@@ -487,9 +488,26 @@ class VideoPlayerWidget(QWidget):
             self.video_item = None
             return None
 
+    @contextmanager
+    def preserve_native_frame_during_geometry_update(self):
+        """Repaint MPV's existing frame without decoding a paused fallback frame."""
+        previous = getattr(self, '_preserve_native_frame_for_geometry', False)
+        self._preserve_native_frame_for_geometry = True
+        try:
+            yield
+        finally:
+            self._preserve_native_frame_for_geometry = previous
+            if self._mpv_surface_active and self.mpv_widget is not None:
+                self.sync_external_surface_geometry()
+                self.mpv_widget._render_ready = True
+                self.mpv_widget.update()
+
     def set_view_transformed(self, transformed: bool):
         """Hint from viewer zoom/pan state to choose compatible render path."""
         transformed = bool(transformed)
+        if getattr(self, '_preserve_native_frame_for_geometry', False) and self._mpv_surface_active:
+            self.sync_external_surface_geometry()
+            return
         paused_native_surface_visible = False
         if not self.is_playing:
             try:

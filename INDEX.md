@@ -29,6 +29,7 @@ TagGUI is a desktop app for image/video tagging, captioning, and dataset prepara
 - `docs/MASONRY_WINDOWED_STRICT_HANDOFF.md`: Current masonry strict-mode handoff and known hurdles.
 - `docs/MASONRY_CURRENT_PROBLEMS_MATRIX.md`: Repro matrix and current fail/pass status.
 - `docs/VIDEO_SURFACE_CONTROLS_GUIDE.md`: Contextual hover controls for video seek, scrub, and temporary speed actions.
+- `docs/FLOATING_WALL_LAYOUT_NOTES.md`: Wall packing comparison, constraints, background reflow, and native verification commands.
 - `docs/PIPELINES_GUIDE.md`: Pipeline creation, step configuration, linking, execution, and import/export guide.
 - `docs/MARKINGS_GUIDE.md`: Manual and automatic marking workflows, class actions, and model safety notes.
 - `docs/QUICK_SORT_GUIDE.md`: Zero-setup keyboard sorting, named destination overrides, qualifier routing, file handling, and session controls.
@@ -81,6 +82,10 @@ TagGUI is a desktop app for image/video tagging, captioning, and dataset prepara
 - `image_list_masonry_completion_service.py`: Masonry completion handler (height reconciliation, anchoring, async UI apply).
 - `image_list_dock.py`: `ImageList` dock widget (toolbar/filter/status integration).
 - `image_viewer.py`: Main image/video preview viewer.
+- `floating_viewer_window.py`: Floating viewer host, manual move/resize, wall menus and review overlays.
+- `floating_viewer_wall_layout.py`: Original shortest-column masonry planner.
+- `floating_wall_packing.py`: Geometry-only masonry/MaxRects candidate search with exact size constraints.
+- `wall_geometry_interaction.py`: Shared manual wall resize and Alt-bypass gesture handling.
 - `image_tags_editor.py`: Tag editing panel plus quick Ideogram caption list/JSON editing, caption creation, and full-editor handoff.
 - `ideogram_caption_editor.py`: Responsive structured-caption inspector with scene/element editing, palettes, autosave state, raw JSON, and persistent Ctrl+wheel UI zoom.
 - `all_tags_editor.py`: Bulk/all-tags editor.
@@ -111,6 +116,7 @@ TagGUI is a desktop app for image/video tagging, captioning, and dataset prepara
 ### Controllers (`taggui/controllers/`)
 
 - `menu_manager.py`: Main menu wiring.
+- `floating_wall_controller.py`: Wall packing options, kept sizes, manual mode, and cancellable background reflow.
 - `toolbar_manager.py`: Toolbar wiring.
 - `signal_manager.py`: Signal/slot wiring.
 - `video_editing_controller.py`: Video editing workflow control, screenshot export, and copy-output media registration.

@@ -5,6 +5,19 @@ All notable changes to TagGUI Video 1M are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.6.23] - 2026-10-21
+
+### Added
+
+- Fit mixed image and video walls with Best fit, Masonry, or MaxRects packing
+- Repack after resizing while keeping manually chosen sizes and preserving playback
+- Control automatic sizing and kept sizes from Settings and wall menus; use Alt or Manual Wall Layout for manual adjustments
+- Hold Space and left-drag to move even tiny floating viewers while the close button is temporarily hidden
+- Add illustrated guides for wall resizing, sizing options, and manual controls
+
+### Changed
+
+- Improve floating wall layouts and tiny-viewer controls
 ## [1.6.22] - 2026-10-16
 
 ### Added

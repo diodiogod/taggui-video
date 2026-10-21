@@ -1023,6 +1023,7 @@ class MenuManager(QObject):
         view_menu.addAction(self.toggle_floating_hold_action)
         view_menu.addAction(self.spawn_floating_viewer_action)
         view_menu.addAction(self.arrange_floating_windows_masonry_action)
+        self.main_window._wall_layout.add_menu(view_menu)
         view_menu.addAction(self.close_all_floating_viewers_action)
 
         self.auto_captioner_compact_layout_action.triggered.connect(

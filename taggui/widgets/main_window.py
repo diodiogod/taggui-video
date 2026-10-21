@@ -9,7 +9,7 @@ import threading
 from collections import deque
 from pathlib import Path
 
-from PySide6.QtCore import QEvent, QFile, QItemSelectionModel, QKeyCombination, QModelIndex, QPersistentModelIndex, QPoint, QUrl, Qt, QThread, QTimer, Slot, QSize, QRect, QRectF, Signal
+from PySide6.QtCore import QEvent, QFile, QItemSelectionModel, QKeyCombination, QModelIndex, QPersistentModelIndex, QPoint, QPointF, QUrl, Qt, QThread, QTimer, Slot, QSize, QRect, QRectF, Signal
 from PySide6.QtGui import (QAction, QActionGroup, QCloseEvent, QDesktopServices,
                            QCursor, QIcon, QKeySequence, QShortcut, QMouseEvent, QPainter, QColor, QPen, QFont)
 from PySide6.QtWidgets import (QAbstractItemView, QAbstractSpinBox, QApplication, QComboBox, QFileDialog, QMainWindow,
@@ -77,7 +77,7 @@ from widgets.quick_tag_panel import QuickTagPanel
 from widgets.folder_tree_panel import FolderTreePanel
 from widgets.image_viewer import ImageViewer
 from widgets.floating_viewer_window import FloatingViewerWindow
-from widgets.floating_viewer_wall_layout import calculate_floating_viewer_wall_layout
+from controllers.floating_wall_controller import FloatingWallController
 from widgets.compare_drag_coordinator import CompareDragCoordinator, CompareTargetCandidate, select_best_target
 from widgets.compare_drop_feedback_overlay import CompareDropFeedbackOverlay
 from widgets.video_sync_coordinator import VideoSyncCoordinator
@@ -668,6 +668,7 @@ class MainWindow(QMainWindow):
         self.image_viewer.marking_effects_controller = self.marking_effects_controller
         self.image_viewer.set_video_loop_persistence_scope('main')
         self._floating_viewers = []
+        self._floating_space_move_active = False
         self._comparison_windows = []
         self._bulk_closing_floating_viewers = False
         self._bulk_close_gc_pending = False
@@ -728,6 +729,7 @@ class MainWindow(QMainWindow):
             lambda: self._step_selection_wall_frames(1)
         )
         self._selection_wall_controls_active = False
+        self._wall_layout = FloatingWallController(self)
         self._perf_hud_timer = QTimer(self)
         self._perf_hud_timer.setInterval(120)
         self._perf_hud_timer.timeout.connect(self._update_perf_hud)
@@ -1188,6 +1190,27 @@ class MainWindow(QMainWindow):
         event_type = safe_event_type(event)
         if event_type is None:
             return False
+
+        # Observe Space before global video/Quick Sort shortcuts consume it;
+        # the pointer can be over a floating viewer while focus stays elsewhere.
+        space_move_active = None
+        if event_type in (QEvent.Type.KeyPress, QEvent.Type.KeyRelease):
+            if event.key() == Qt.Key.Key_Space and not event.isAutoRepeat():
+                space_move_active = (
+                    event_type == QEvent.Type.KeyPress
+                    and event.modifiers() == Qt.KeyboardModifier.NoModifier
+                    and not self._focus_widget_accepts_text()
+                    and not bool(self.app.property('quick_sort_key_capture'))
+                )
+        elif event_type == QEvent.Type.ApplicationDeactivate:
+            space_move_active = False
+        if space_move_active is not None:
+            self._floating_space_move_active = space_move_active
+            for window in list(getattr(self, '_floating_viewers', [])):
+                try:
+                    window.set_space_move_active(space_move_active)
+                except RuntimeError:
+                    pass
 
         if event_type in (
             QEvent.Type.DragEnter,
@@ -1706,6 +1729,7 @@ class MainWindow(QMainWindow):
                 return
         self._main_window_closing = True
         self.is_running = False
+        self._wall_layout.close()
         self._arm_shutdown_failsafe()
         self.cancel_compare_drag()
         self.close_all_floating_viewers()
@@ -5174,6 +5198,7 @@ class MainWindow(QMainWindow):
 
     def _clear_selection_masonry_wall_state(self, *, stop_sync: bool = True):
         """Remove masonry-wall flags and overlays from all current floating windows."""
+        self._wall_layout.cancel()
         if stop_sync and getattr(self, '_sync_scope', '') == 'selection_wall':
             self._stop_active_sync_coordinator()
 
@@ -6601,6 +6626,7 @@ class MainWindow(QMainWindow):
         viewer.set_video_loop_persistence_scope(f"floating_{slot_id}")
         title = f"Viewer {slot_id}"
         window = FloatingViewerWindow(viewer, title, parent=self)
+        self._wall_layout.watch(window)
         window.slot_id = slot_id
         window.activated.connect(self._activate_floating_action_target)
         window.closing.connect(self._on_floating_viewer_closed)
@@ -7048,16 +7074,11 @@ class MainWindow(QMainWindow):
         if not layout_rect.isValid():
             layout_rect = QRect(80, 80, max(640, self.width()), max(480, self.height()))
 
-        min_item_width = 220 if len(windows) <= 8 else 170
-        rects = calculate_floating_viewer_wall_layout(
-            [self._window_arrangement_aspect_ratio(window) for window in windows],
-            layout_rect,
-            spacing=self._floating_viewer_wall_gap_px(),
-            min_item_width=min_item_width,
-            min_item_height=120,
-            horizontal_alignment=self._floating_viewer_wall_horizontal_alignment(),
-        )
+        rects = self._wall_layout.plan_existing(
+            windows, layout_rect, preserve_order=preserve_screen_order)
         if not rects:
+            self._wall_layout.show_message(
+                'These sizes do not fit. Enable automatic sizing or release kept window sizes.')
             return []
 
         active_window = None
@@ -7149,7 +7170,7 @@ class MainWindow(QMainWindow):
                 pass
             self.refresh_video_controls_performance_profile()
 
-        QTimer.singleShot(0, _restore_after_arrange)
+        QTimer.singleShot(0, self, _restore_after_arrange)
         return windows
 
     @Slot()
@@ -7292,15 +7313,13 @@ class MainWindow(QMainWindow):
         if not layout_rect.isValid():
             layout_rect = QRect(80, 80, max(640, self.width()), max(480, self.height()))
 
-        min_item_width = 220 if len(proxy_indices) <= 8 else 170
-        rects = calculate_floating_viewer_wall_layout(
+        rects = self._wall_layout.plan_initial(
             [self._get_image_aspect_ratio_for_index(index) or 1.0 for index in proxy_indices],
             layout_rect,
-            spacing=self._floating_viewer_wall_gap_px(),
-            min_item_width=min_item_width,
-            min_item_height=120,
-            horizontal_alignment=self._floating_viewer_wall_horizontal_alignment(),
         )
+        if not rects:
+            self._wall_layout.show_message('Too many windows to fit on this screen.')
+            return []
 
         spawned_infos = []
         current_index = self._normalize_spawn_proxy_index(
@@ -7431,6 +7450,7 @@ class MainWindow(QMainWindow):
             comp_widget.move(top_left + QPoint(140, 100))
 
         self._comparison_windows.append(comp_widget)
+        self._wall_layout.watch(comp_widget)
         comp_widget.closing.connect(lambda: self._on_media_comparison_closed(comp_widget))
         comp_widget.show()
         comp_widget.raise_()

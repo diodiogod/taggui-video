@@ -1,12 +1,12 @@
 from PySide6.QtCore import Qt, Slot, QUrl, QThread, Signal, QRectF, QPointF, QTimer
-from PySide6.QtGui import QDesktopServices, QColor, QPainter, QPen, QLinearGradient, QPainterPath, QFont
+from PySide6.QtGui import QDesktopServices, QColor, QPainter, QPen, QLinearGradient, QPainterPath, QFont, QKeySequence
 from PySide6.QtWidgets import (QDialog, QFileDialog, QGridLayout, QLabel,
                                QLineEdit, QPushButton, QVBoxLayout, QComboBox,
                                QScrollArea, QWidget, QTabWidget, QMessageBox, QHBoxLayout, QColorDialog,
                                QApplication, QGroupBox, QProgressDialog, QGraphicsItem,
                                QGraphicsRectItem, QGraphicsScene, QGraphicsSimpleTextItem,
                                QGraphicsTextItem,
-                               QGraphicsView)
+                               QGraphicsView, QKeySequenceEdit)
 
 from pathlib import Path
 import sys
@@ -2014,6 +2014,47 @@ class SettingsDialog(QDialog):
         scroll_area.setWidget(widget)
         return scroll_area
 
+    def _create_wall_layout_settings(self):
+        group = QGroupBox('Floating Wall Layout')
+        grid = QGridLayout(group)
+        algorithm = SettingsComboBox(key='floating_wall_algorithm')
+        algorithm.addItems(['Best fit', 'Masonry', 'MaxRects'])
+        algorithm.setToolTip(
+            'Best fit compares masonry and MaxRects and keeps the largest feasible layout.\n'
+            'MaxRects preserves orientation. If unavailable, masonry is used.\n'
+            'The wall right-click menu can override this choice for the current session.')
+        grid.addWidget(QLabel('Packing algorithm'), 0, 0)
+        grid.addWidget(algorithm, 0, 1)
+        for row, (label, key, tooltip) in enumerate((
+            ('Reflow after resizing', 'floating_wall_reflow_after_resize',
+             'Repack the current wall after releasing a resize. Hold Alt during the gesture to skip it.\n'
+             'Moving a window alone never triggers reflow. Manual Wall Layout suspends automatic reflow.'),
+            ('Automatically size other windows', 'floating_wall_automatic_sizing',
+             'Allow windows without kept sizes to grow or shrink while preserving their proportions.\n'
+             'When disabled, repacking changes positions only. Initial opening still sizes the new wall to fit.'),
+            ('Preserve manually resized sizes', 'floating_wall_preserve_manual_sizes',
+             'Keep each manually resized window at its chosen size across later rearrangements.\n'
+             'Use the wall menu to release a kept size or reset all kept sizes.\n'
+             'If nothing fits, retain the current geometry and show a message.'),
+        ), 1):
+            control = SettingsBigCheckBox(key=key)
+            control.setToolTip(tooltip)
+            grid.addWidget(QLabel(label), row, 0)
+            grid.addWidget(control, row, 1)
+        shortcut = QKeySequenceEdit(QKeySequence(settings.value(
+            'floating_wall_manual_shortcut', DEFAULT_SETTINGS['floating_wall_manual_shortcut'], type=str)))
+        shortcut.setMaximumSequenceLength(1)
+        shortcut.setToolTip('Toggle Manual Wall Layout for this session. Clear to disable the shortcut.')
+        shortcut.editingFinished.connect(lambda: settings.setValue(
+            'floating_wall_manual_shortcut', shortcut.keySequence().toString(QKeySequence.SequenceFormat.PortableText)))
+        grid.addWidget(QLabel('Manual layout shortcut'), 4, 0)
+        grid.addWidget(shortcut, 4, 1)
+        hint = QLabel('Hold Alt to resize or move manually for one gesture. Shift controls aspect ratio.\n'
+                      'Right-click a wall window for live layout options and kept sizes.')
+        hint.setWordWrap(True)
+        grid.addWidget(hint, 5, 0, 1, 2)
+        return group
+
     def _create_advanced_tab(self):
         """Create Advanced settings tab."""
         scroll_area = QScrollArea()
@@ -2232,6 +2273,7 @@ class SettingsDialog(QDialog):
 
         layout.addWidget(workflow_group)
         layout.addWidget(display_group)
+        layout.addWidget(self._create_wall_layout_settings())
         layout.addWidget(maintenance_group)
         layout.addWidget(diagnostics_group)
         layout.addWidget(video_group)

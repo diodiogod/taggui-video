@@ -7,6 +7,7 @@ pillow-avif-plugin==1.5.5
 pillow-jxl-plugin~=1.3.4
 pyparsing==3.2.1
 PySide6==6.9.0
+rectpack==0.2.2
 transformers==5.5.0
 
 # Video support

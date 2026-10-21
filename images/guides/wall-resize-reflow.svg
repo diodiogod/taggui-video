@@ -1,0 +1,141 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1536" height="880" viewBox="0 0 1536 880">
+<rect width="1536" height="880" fill="#f6f8fc"/>
+<text x="44" y="70" font-family="Arial" font-size="40" font-weight="700" fill="#12233b" text-anchor="start">Resize one window. Reflow the wall.</text>
+<text x="44" y="108" font-family="Arial" font-size="21" font-weight="400" fill="#52657d" text-anchor="start">Illustrated example. Positions are schematic; proportions and kept sizes are consistent.</text>
+<rect x="44" y="152" width="46" height="44" rx="22" fill="#e4edf8"/>
+<text x="67.0" y="181" font-family="Arial" font-size="18" font-weight="700" fill="#12233b" text-anchor="middle">1</text>
+<text x="105" y="183" font-family="Arial" font-size="27" font-weight="700" fill="#12233b" text-anchor="start">Start with a wall</text>
+<rect x="44" y="218" width="440" height="438" rx="18" fill="#152b42"/>
+<text x="62" y="244" font-family="Arial" font-size="13" font-weight="700" fill="#acc0d6" text-anchor="start">SCREEN AREA</text>
+<defs><clipPath id="media1"><rect x="62" y="262" width="220" height="110" rx="8"/></clipPath></defs>
+<g clip-path="url(#media1)">
+<rect x="62" y="262" width="220" height="110" rx="8" fill="#299ca8"/>
+<circle cx="233.6" cy="295.0" r="13.2" fill="#ffe7b1"/>
+<path d="M62,372 L62,336.8 L123.60000000000001,300.5 L187.39999999999998,343.4 L238.0,317.0 L282,345.6 L282,372 Z" fill="#142944" fill-opacity=".4"/>
+<path d="M62,372 L62,356.6 L101.6,333.5 L176.4,358.8 L222.6,330.2 L282,363.2 L282,372 Z" fill="#102137" fill-opacity=".38"/>
+</g>
+<text x="73" y="290" font-family="Arial" font-size="24" font-weight="700" fill="#ffffff" text-anchor="start">A</text>
+<defs><clipPath id="media2"><rect x="62" y="433" width="190" height="95" rx="8"/></clipPath></defs>
+<g clip-path="url(#media2)">
+<rect x="62" y="433" width="190" height="95" rx="8" fill="#8861c1"/>
+<circle cx="210.20000000000002" cy="461.5" r="11.4" fill="#ffe7b1"/>
+<path d="M62,528 L62,497.6 L115.2,466.25 L170.3,503.3 L214.0,480.5 L252,505.2 L252,528 Z" fill="#142944" fill-opacity=".4"/>
+<path d="M62,528 L62,514.7 L96.19999999999999,494.75 L160.8,516.6 L200.7,491.9 L252,520.4 L252,528 Z" fill="#102137" fill-opacity=".38"/>
+</g>
+<text x="73" y="461" font-family="Arial" font-size="24" font-weight="700" fill="#ffffff" text-anchor="start">B</text>
+<path d="M150.0,470.5 L167.0,480.5 L150.0,490.5 Z" fill="#ffffff" fill-opacity=".8"/>
+<defs><clipPath id="media3"><rect x="358" y="262" width="110" height="110" rx="8"/></clipPath></defs>
+<g clip-path="url(#media3)">
+<rect x="358" y="262" width="110" height="110" rx="8" fill="#4386d4"/>
+<circle cx="443.8" cy="295.0" r="13.2" fill="#ffe7b1"/>
+<path d="M358,372 L358,336.8 L388.8,300.5 L420.7,343.4 L446.0,317.0 L468,345.6 L468,372 Z" fill="#142944" fill-opacity=".4"/>
+<path d="M358,372 L358,356.6 L377.8,333.5 L415.2,358.8 L438.3,330.2 L468,363.2 L468,372 Z" fill="#102137" fill-opacity=".38"/>
+</g>
+<text x="369" y="290" font-family="Arial" font-size="24" font-weight="700" fill="#ffffff" text-anchor="start">C</text>
+<defs><clipPath id="media4"><rect x="324" y="454" width="84" height="168" rx="8"/></clipPath></defs>
+<g clip-path="url(#media4)">
+<rect x="324" y="454" width="84" height="168" rx="8" fill="#db776a"/>
+<circle cx="389.52" cy="504.4" r="10.08" fill="#ffe7b1"/>
+<path d="M324,622 L324,568.24 L347.52,512.8 L371.88,578.3199999999999 L391.2,538.0 L408,581.6800000000001 L408,622 Z" fill="#142944" fill-opacity=".4"/>
+<path d="M324,622 L324,598.48 L339.12,563.2 L367.68,601.84 L385.32,558.16 L408,608.56 L408,622 Z" fill="#102137" fill-opacity=".38"/>
+</g>
+<text x="335" y="482" font-family="Arial" font-size="24" font-weight="700" fill="#ffffff" text-anchor="start">D</text>
+<path d="M359.0,528.0 L376.0,538.0 L359.0,548.0 Z" fill="#ffffff" fill-opacity=".8"/>
+<text x="44" y="696" font-family="Arial" font-size="22" font-weight="700" fill="#12233b" text-anchor="start">A begins at its original size.</text>
+<text x="44" y="728" font-family="Arial" font-size="22" font-weight="400" fill="#12233b" text-anchor="start">B, C and D have different shapes.</text>
+<rect x="548" y="152" width="46" height="44" rx="22" fill="#e4edf8"/>
+<text x="571.0" y="181" font-family="Arial" font-size="18" font-weight="700" fill="#12233b" text-anchor="middle">2</text>
+<text x="609" y="183" font-family="Arial" font-size="27" font-weight="700" fill="#12233b" text-anchor="start">Resize A</text>
+<rect x="548" y="218" width="440" height="438" rx="18" fill="#152b42"/>
+<text x="566" y="244" font-family="Arial" font-size="13" font-weight="700" fill="#acc0d6" text-anchor="start">SCREEN AREA</text>
+<defs><clipPath id="media5"><rect x="566" y="262" width="290" height="145" rx="8"/></clipPath></defs>
+<g clip-path="url(#media5)">
+<rect x="566" y="262" width="290" height="145" rx="8" fill="#299ca8"/>
+<circle cx="792.2" cy="305.5" r="17.4" fill="#ffe7b1"/>
+<path d="M566,407 L566,360.6 L647.2,312.75 L731.3,369.3 L798.0,334.5 L856,372.2 L856,407 Z" fill="#142944" fill-opacity=".4"/>
+<path d="M566,407 L566,386.7 L618.2,356.25 L716.8,389.6 L777.7,351.9 L856,395.4 L856,407 Z" fill="#102137" fill-opacity=".38"/>
+</g>
+<text x="577" y="290" font-family="Arial" font-size="24" font-weight="700" fill="#ffffff" text-anchor="start">A</text>
+<rect x="566" y="262" width="290" height="145" rx="8" fill="none" stroke="#ffc45a" stroke-width="4"/>
+<rect x="849" y="400" width="14" height="14" rx="2" fill="#ffc45a"/>
+<path d="M862,411 l0,27 l8,-8 l7,13 l6,-3 l-7,-12 l11,-1 Z" fill="#ffffff" stroke="#12233b" stroke-width="2"/>
+<defs><clipPath id="media6"><rect x="566" y="433" width="190" height="95" rx="8"/></clipPath></defs>
+<g clip-path="url(#media6)">
+<rect x="566" y="433" width="190" height="95" rx="8" fill="#8861c1"/>
+<circle cx="714.2" cy="461.5" r="11.4" fill="#ffe7b1"/>
+<path d="M566,528 L566,497.6 L619.2,466.25 L674.3,503.3 L718.0,480.5 L756,505.2 L756,528 Z" fill="#142944" fill-opacity=".4"/>
+<path d="M566,528 L566,514.7 L600.2,494.75 L664.8,516.6 L704.7,491.9 L756,520.4 L756,528 Z" fill="#102137" fill-opacity=".38"/>
+</g>
+<text x="577" y="461" font-family="Arial" font-size="24" font-weight="700" fill="#ffffff" text-anchor="start">B</text>
+<path d="M654.0,470.5 L671.0,480.5 L654.0,490.5 Z" fill="#ffffff" fill-opacity=".8"/>
+<defs><clipPath id="media7"><rect x="862" y="262" width="110" height="110" rx="8"/></clipPath></defs>
+<g clip-path="url(#media7)">
+<rect x="862" y="262" width="110" height="110" rx="8" fill="#4386d4"/>
+<circle cx="947.8" cy="295.0" r="13.2" fill="#ffe7b1"/>
+<path d="M862,372 L862,336.8 L892.8,300.5 L924.7,343.4 L950.0,317.0 L972,345.6 L972,372 Z" fill="#142944" fill-opacity=".4"/>
+<path d="M862,372 L862,356.6 L881.8,333.5 L919.2,358.8 L942.3,330.2 L972,363.2 L972,372 Z" fill="#102137" fill-opacity=".38"/>
+</g>
+<text x="873" y="290" font-family="Arial" font-size="24" font-weight="700" fill="#ffffff" text-anchor="start">C</text>
+<defs><clipPath id="media8"><rect x="828" y="454" width="84" height="168" rx="8"/></clipPath></defs>
+<g clip-path="url(#media8)">
+<rect x="828" y="454" width="84" height="168" rx="8" fill="#db776a"/>
+<circle cx="893.52" cy="504.4" r="10.08" fill="#ffe7b1"/>
+<path d="M828,622 L828,568.24 L851.52,512.8 L875.88,578.3199999999999 L895.2,538.0 L912,581.6800000000001 L912,622 Z" fill="#142944" fill-opacity=".4"/>
+<path d="M828,622 L828,598.48 L843.12,563.2 L871.68,601.84 L889.32,558.16 L912,608.56 L912,622 Z" fill="#102137" fill-opacity=".38"/>
+</g>
+<text x="839" y="482" font-family="Arial" font-size="24" font-weight="700" fill="#ffffff" text-anchor="start">D</text>
+<path d="M863.0,528.0 L880.0,538.0 L863.0,548.0 Z" fill="#ffffff" fill-opacity=".8"/>
+<text x="548" y="696" font-family="Arial" font-size="22" font-weight="700" fill="#12233b" text-anchor="start">Only A changes while you drag.</text>
+<text x="548" y="728" font-family="Arial" font-size="22" font-weight="400" fill="#12233b" text-anchor="start">A keeps its landscape proportions.</text>
+<rect x="1052" y="152" width="46" height="44" rx="22" fill="#e4edf8"/>
+<text x="1075.0" y="181" font-family="Arial" font-size="18" font-weight="700" fill="#12233b" text-anchor="middle">3</text>
+<text x="1113" y="183" font-family="Arial" font-size="27" font-weight="700" fill="#12233b" text-anchor="start">Release the mouse</text>
+<rect x="1052" y="218" width="440" height="438" rx="18" fill="#152b42"/>
+<text x="1070" y="244" font-family="Arial" font-size="13" font-weight="700" fill="#acc0d6" text-anchor="start">SCREEN AREA</text>
+<defs><clipPath id="media9"><rect x="1070" y="262" width="290" height="145" rx="8"/></clipPath></defs>
+<g clip-path="url(#media9)">
+<rect x="1070" y="262" width="290" height="145" rx="8" fill="#299ca8"/>
+<circle cx="1296.2" cy="305.5" r="17.4" fill="#ffe7b1"/>
+<path d="M1070,407 L1070,360.6 L1151.2,312.75 L1235.3,369.3 L1302.0,334.5 L1360,372.2 L1360,407 Z" fill="#142944" fill-opacity=".4"/>
+<path d="M1070,407 L1070,386.7 L1122.2,356.25 L1220.8,389.6 L1281.7,351.9 L1360,395.4 L1360,407 Z" fill="#102137" fill-opacity=".38"/>
+</g>
+<text x="1081" y="290" font-family="Arial" font-size="24" font-weight="700" fill="#ffffff" text-anchor="start">A</text>
+<rect x="1070" y="262" width="290" height="145" rx="8" fill="none" stroke="#ffc45a" stroke-width="4"/>
+<rect x="1333" y="283" width="17" height="14" rx="3" fill="#ffc45a"/>
+<path d="M1337,284 V280 A4.5,4.5 0 0 1 1346,280 V284" fill="none" stroke="#ffc45a" stroke-width="3"/>
+<defs><clipPath id="media10"><rect x="1070" y="429" width="174" height="87" rx="8"/></clipPath></defs>
+<g clip-path="url(#media10)">
+<rect x="1070" y="429" width="174" height="87" rx="8" fill="#8861c1"/>
+<circle cx="1205.72" cy="455.1" r="10.44" fill="#ffe7b1"/>
+<path d="M1070,516 L1070,488.16 L1118.72,459.45 L1169.18,493.38 L1209.2,472.5 L1244,495.12 L1244,516 Z" fill="#142944" fill-opacity=".4"/>
+<path d="M1070,516 L1070,503.82 L1101.32,485.55 L1160.48,505.56 L1197.02,482.94 L1244,509.04 L1244,516 Z" fill="#102137" fill-opacity=".38"/>
+</g>
+<text x="1081" y="457" font-family="Arial" font-size="24" font-weight="700" fill="#ffffff" text-anchor="start">B</text>
+<path d="M1150.0,462.5 L1167.0,472.5 L1150.0,482.5 Z" fill="#ffffff" fill-opacity=".8"/>
+<defs><clipPath id="media11"><rect x="1378" y="262" width="90" height="90" rx="8"/></clipPath></defs>
+<g clip-path="url(#media11)">
+<rect x="1378" y="262" width="90" height="90" rx="8" fill="#4386d4"/>
+<circle cx="1448.2" cy="289.0" r="10.799999999999999" fill="#ffe7b1"/>
+<path d="M1378,352 L1378,323.2 L1403.2,293.5 L1429.3,328.6 L1450.0,307.0 L1468,330.4 L1468,352 Z" fill="#142944" fill-opacity=".4"/>
+<path d="M1378,352 L1378,339.4 L1394.2,320.5 L1424.8,341.2 L1443.7,317.8 L1468,344.8 L1468,352 Z" fill="#102137" fill-opacity=".38"/>
+</g>
+<text x="1389" y="290" font-family="Arial" font-size="24" font-weight="700" fill="#ffffff" text-anchor="start">C</text>
+<defs><clipPath id="media12"><rect x="1272" y="429" width="84" height="168" rx="8"/></clipPath></defs>
+<g clip-path="url(#media12)">
+<rect x="1272" y="429" width="84" height="168" rx="8" fill="#db776a"/>
+<circle cx="1337.52" cy="479.4" r="10.08" fill="#ffe7b1"/>
+<path d="M1272,597 L1272,543.24 L1295.52,487.8 L1319.88,553.3199999999999 L1339.2,513.0 L1356,556.6800000000001 L1356,597 Z" fill="#142944" fill-opacity=".4"/>
+<path d="M1272,597 L1272,573.48 L1287.12,538.2 L1315.68,576.84 L1333.32,533.16 L1356,583.56 L1356,597 Z" fill="#102137" fill-opacity=".38"/>
+</g>
+<text x="1283" y="457" font-family="Arial" font-size="24" font-weight="700" fill="#ffffff" text-anchor="start">D</text>
+<path d="M1307.0,503.0 L1324.0,513.0 L1307.0,523.0 Z" fill="#ffffff" fill-opacity=".8"/>
+<text x="1052" y="696" font-family="Arial" font-size="22" font-weight="700" fill="#12233b" text-anchor="start">A&#x27;s chosen size is kept.</text>
+<text x="1052" y="728" font-family="Arial" font-size="22" font-weight="400" fill="#12233b" text-anchor="start">Other windows may move or resize.</text>
+<rect x="44" y="786" width="262" height="44" rx="22" fill="#ddefe9"/>
+<text x="175.0" y="815" font-family="Arial" font-size="18" font-weight="700" fill="#12233b" text-anchor="middle">Reflow after resizing: ON</text>
+<rect x="327" y="786" width="354" height="44" rx="22" fill="#fff0d4"/>
+<text x="504.0" y="815" font-family="Arial" font-size="18" font-weight="700" fill="#12233b" text-anchor="middle">Preserve manually resized sizes: ON</text>
+<rect x="702" y="786" width="330" height="44" rx="22" fill="#e4edf8"/>
+<text x="867.0" y="815" font-family="Arial" font-size="18" font-weight="700" fill="#12233b" text-anchor="middle">Automatically size other windows: ON</text>
+<text x="1490" y="856" font-family="Arial" font-size="16" font-weight="400" fill="#52657d" text-anchor="end">A / B: landscape    C: square    D: portrait</text>
+</svg>

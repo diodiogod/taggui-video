@@ -22,6 +22,7 @@ from widgets.compare_divider_utils import (
 )
 from widgets.video_controls import VideoControlsWidget
 from widgets.video_sync_coordinator import VideoSyncCoordinator
+from widgets.wall_geometry_interaction import WallGeometryInteraction
 
 try:
     from shiboken6 import isValid as _shiboken_is_valid
@@ -29,7 +30,7 @@ except Exception:
     _shiboken_is_valid = None
 
 
-class MediaComparisonWidget(QWidget):
+class MediaComparisonWidget(WallGeometryInteraction, QWidget):
     """Frameless comparison window for video media (2-way with optional 3rd/4th layers)."""
 
     closing = Signal()
@@ -783,6 +784,10 @@ class MediaComparisonWidget(QWidget):
         if callable(close_all):
             close_all_action = menu.addAction("Close all spawned viewers")
 
+        controller = getattr(parent, '_wall_layout', None)
+        if controller is not None and bool(getattr(self, '_selection_masonry_wall_window', False)):
+            controller.add_menu(menu, self)
+
         selected = menu.exec(global_pos)
         if selected is close_action:
             self.close()
@@ -960,6 +965,7 @@ class MediaComparisonWidget(QWidget):
         return None
 
     def _begin_window_drag(self, event, watched: QWidget | None = None):
+        self._begin_wall_geometry_gesture(event)
         global_pos = self._event_global_pos(event, watched)
         drag_button = Qt.MouseButton.LeftButton
         try:
@@ -994,6 +1000,7 @@ class MediaComparisonWidget(QWidget):
     def _begin_window_resize(self, event, zone_name, watched: QWidget | None = None):
         if not zone_name:
             return
+        self._begin_wall_geometry_gesture(event)
         self._resize_active = True
         self._resize_zone = str(zone_name)
         self._resize_start_global = self._event_global_pos(event, watched)
@@ -1004,12 +1011,16 @@ class MediaComparisonWidget(QWidget):
             pass
 
     def _end_window_resize(self):
+        was_active = self._resize_active
         self._resize_active = False
         self._resize_zone = None
         try:
             self.releaseMouse()
         except Exception:
             pass
+
+        if was_active:
+            self._finish_wall_resize(self._resize_start_geometry, commit=not self._closed)
 
     def _apply_window_resize(self, global_pos: QPoint):
         if not self._resize_active or not self._resize_zone:
@@ -2301,6 +2312,8 @@ class MediaComparisonWidget(QWidget):
             return
 
     def eventFilter(self, watched, event):
+        if self._resize_active or self._window_drag_active:
+            self._track_wall_geometry_gesture(event)
         event_type = event.type()
         if event_type in (QEvent.Type.MouseMove, QEvent.Type.HoverMove, QEvent.Type.Enter, QEvent.Type.HoverEnter):
             self._update_overlay_hover_from_global_pos(
@@ -2528,6 +2541,8 @@ class MediaComparisonWidget(QWidget):
         super().mousePressEvent(event)
 
     def mouseMoveEvent(self, event):
+        if self._resize_active or self._window_drag_active:
+            self._track_wall_geometry_gesture(event)
         if (
             self._pointer_over_shared_controls()
             and not self._window_drag_active
@@ -2560,6 +2575,8 @@ class MediaComparisonWidget(QWidget):
         super().mouseMoveEvent(event)
 
     def mouseReleaseEvent(self, event):
+        if self._resize_active or self._window_drag_active:
+            self._track_wall_geometry_gesture(event)
         if event.button() == Qt.MouseButton.LeftButton:
             if self._resize_active:
                 self._end_window_resize()
