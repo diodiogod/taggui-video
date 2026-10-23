@@ -1667,17 +1667,20 @@ class MainWindow(QMainWindow):
         pending = self._display_move_windows
         if key not in pending:
             viewers = self._video_viewers_for_host(window)
-            pending[key] = (window, viewers)
+            guarded_viewers = []
             for viewer in viewers:
                 player = getattr(viewer, 'video_player', None)
                 if player is not None:
                     try:
-                        player.prepare_for_display_change()
+                        if player.prepare_for_display_change():
+                            guarded_viewers.append(viewer)
                     except RuntimeError:
                         continue
-            if viewers:
+            if guarded_viewers:
+                pending[key] = (window, guarded_viewers)
                 print('[DISPLAY] Window crossed screens; rebuilding its native video surface')
-        self._display_change_timer.start()
+        if key in pending:
+            self._display_change_timer.start()
 
     @Slot()
     def _finish_display_change(self):

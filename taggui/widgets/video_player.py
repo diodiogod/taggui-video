@@ -731,14 +731,24 @@ class VideoPlayerWidget(QWidget):
         # entering libmpv's synchronous OpenGL render callback.
         QTimer.singleShot(350, _resume_after_display_settles)
 
-    def prepare_for_display_change(self) -> None:
+    def prepare_for_display_change(self) -> bool:
         """Park MPV rendering while a window crosses display adapters.
 
         Playback keeps advancing while the GL surface is hidden. The render
         context is rebuilt only after movement settles, preserving the current
         playback position instead of visibly restarting the clip.
         """
-        rebuild_mpv = self.mpv_player is not None
+        rebuild_mpv = bool(
+            self.mpv_player is not None
+            and self.video_path is not None
+            and self._is_mpv_forward_active()
+            and (
+                self._mpv_surface_active
+                or self._mpv_surface_active_before_app_suspend
+            )
+        )
+        if not rebuild_mpv:
+            return False
         self._display_change_rebuild_mpv = bool(
             self._display_change_rebuild_mpv or rebuild_mpv
         )
@@ -747,10 +757,11 @@ class VideoPlayerWidget(QWidget):
             or (rebuild_mpv and self.is_playing)
         )
         if bool(getattr(self, '_display_change_pending', False)):
-            return
+            return True
         self._display_change_pending = True
         if rebuild_mpv:
             self.set_application_render_active(False)
+        return True
 
     def finish_display_change(self) -> None:
         """Recreate video resources after the destination display settles."""
