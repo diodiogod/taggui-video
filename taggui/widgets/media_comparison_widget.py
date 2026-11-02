@@ -769,7 +769,7 @@ class MediaComparisonWidget(WallGeometryInteraction, QWidget):
         close_all = getattr(parent, "close_all_floating_viewers", None) if parent is not None else None
         arrange_windows = getattr(parent, "arrange_floating_windows_as_masonry", None) if parent is not None else None
         toggle_wall_controls = getattr(parent, "set_selection_masonry_wall_controls_enabled_for_window", None) if parent is not None else None
-        if callable(arrange_windows):
+        if callable(arrange_windows) and not getattr(self, '_selection_masonry_wall_window', False):
             menu.addSeparator()
             arrange_action = menu.addAction("Arrange as Masonry Wall")
         if callable(toggle_wall_controls) and bool(getattr(self, '_selection_masonry_wall_window', False)):
@@ -789,6 +789,8 @@ class MediaComparisonWidget(WallGeometryInteraction, QWidget):
             controller.add_menu(menu, self)
 
         selected = menu.exec(global_pos)
+        if selected is None:
+            return
         if selected is close_action:
             self.close()
         elif selected is multi_compare_action:

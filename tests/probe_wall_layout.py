@@ -10,7 +10,7 @@ import traceback
 import cv2
 import numpy as np
 import pytest
-from PySide6.QtCore import QPoint
+from PySide6.QtCore import QPoint, QRect, Qt
 from PySide6.QtGui import QColor, QImage, QPainter
 from PySide6.QtTest import QTest
 
@@ -173,6 +173,79 @@ def test_native_reflow_preserves_playback_and_toggle_during_pending_layout(tmp_p
         assert coordinator.is_paused() != initial_paused
         assert windows[0].size() == chosen_size and windows[1].size() == chosen_second
         check_visible_frames('after-toggle')
+        # Real Ctrl-drag input on the live backend: siblings remain still until release.
+        anchors = host._wall_layout.anchors
+        target = windows[2].viewer.view.viewport()
+        point = target.rect().center()
+        siblings = [QRect(w.geometry()) for w in windows]
+        QTest.mousePress(target, Qt.LeftButton, Qt.ControlModifier, point)
+        assert anchors.drag is not None
+        QTest.mouseMove(target, point + QPoint(2, 0))
+        pump(lambda: anchors.drag['result'] is not None, seconds=10)
+        assert anchors.drag['result'] is not False
+        assert [w.geometry() for w in windows[:2]] == siblings[:2]
+        assert anchors.overlay.isVisible()
+        QTest.mouseRelease(target, Qt.LeftButton, Qt.ControlModifier, target.rect().center())
+        pump(lambda: anchors.drag is None, seconds=10)
+        assert windows[2]._wall_position_anchored
+        assert coordinator.is_paused() != initial_paused
+        assert all(p.is_playing == initial_paused for p in players)
+        assert valid_layout([w.geometry() for w in windows], windows[0].screen().availableGeometry(), 6)
+        check_visible_frames('after-anchor')
+        # Anchoring must not suppress later real resize-release reflow.
+        previous_layout = host._wall_layout.last_result
+        resize_gesture(windows[2], QPoint(-40, -30))
+        anchor_geometry = QRect(windows[2].geometry())
+        finish_reflow(host._wall_layout)
+        assert host._wall_layout.last_result is not previous_layout
+        assert windows[2].geometry() == anchor_geometry
+        previous_layout = host._wall_layout.last_result
+        resize_gesture(windows[0], QPoint(-30, -25))
+        resized_size = windows[0].size()
+        finish_reflow(host._wall_layout)
+        assert host._wall_layout.last_result is not previous_layout
+        assert windows[2].geometry() == anchor_geometry
+        assert windows[0].size() == resized_size
+        assert coordinator.is_paused() != initial_paused
+        assert all(p.is_playing == initial_paused for p in players)
+        assert valid_layout([w.geometry() for w in windows], windows[0].screen().availableGeometry(), 6)
+        check_visible_frames('after-anchored-resizes')
+        # Exercise real control children and hover seek zones at the resize corner.
+        window = windows[3]
+        controls = window.viewer.video_controls
+        clicks = []
+        controls.skip_back_btn.clicked.connect(lambda: clicks.append(True))
+        for panel_visible in (True, False):
+            if panel_visible:
+                controls.show()
+                controls.raise_()
+                button = controls.skip_back_btn
+                button_point = button.rect().center()
+                corner = window.mapToGlobal(window.rect().bottomRight()-QPoint(3,3))
+                controls.move(controls.pos()+corner-button.mapToGlobal(button_point))
+                target, point = button, button_point
+            else:
+                controls.hide()
+                target = window.viewer.view.viewport()
+                point = target.rect().bottomRight()-QPoint(3,3)
+            start = target.mapToGlobal(point)
+            before_siblings = [QRect(w.geometry()) for w in windows[:3]]
+            QTest.mousePress(target, Qt.LeftButton, Qt.NoModifier, point)
+            assert window._resize_active, 'Video overlay intercepted resize corner'
+            destination = start-QPoint(20,20)
+            QTest.mouseMove(window, window.mapFromGlobal(destination))
+            pump(lambda: host._wall_layout.resize_preview.overlay.isVisible(), seconds=10)
+            assert [w.geometry() for w in windows[:3]] == before_siblings
+            assert all(p.is_playing == initial_paused for p in players)
+            QTest.mouseRelease(window, Qt.LeftButton, Qt.NoModifier, window.mapFromGlobal(destination))
+            finish_reflow(host._wall_layout)
+            assert not window._resize_active
+            assert not host._wall_layout.resize_preview.overlay.isVisible()
+            assert not clicks, 'Corner resizing clicked a video seek button'
+            assert all(p.is_playing == initial_paused for p in players)
+        check_visible_frames('after-control-corner-resizes')
+
+
         assert not geometry_decodes, '\n'.join(geometry_decodes)
         if initial_paused:
             positions = [p._get_mpv_position_ms() for p in players]

@@ -85,6 +85,7 @@ TagGUI is a desktop app for image/video tagging, captioning, and dataset prepara
 - `floating_viewer_window.py`: Floating viewer host, manual move/resize, wall menus and review overlays.
 - `floating_viewer_wall_layout.py`: Original shortest-column masonry planner.
 - `floating_wall_packing.py`: Geometry-only masonry/MaxRects candidate search with exact size constraints.
+- `wall_anchor_packing.py`: Obstacle-aware packing around exact position anchors.
 - `wall_geometry_interaction.py`: Shared manual wall resize and Alt-bypass gesture handling.
 - `image_tags_editor.py`: Tag editing panel plus quick Ideogram caption list/JSON editing, caption creation, and full-editor handoff.
 - `ideogram_caption_editor.py`: Responsive structured-caption inspector with scene/element editing, palettes, autosave state, raw JSON, and persistent Ctrl+wheel UI zoom.
@@ -106,6 +107,8 @@ TagGUI is a desktop app for image/video tagging, captioning, and dataset prepara
 
 ### Dialogs (`taggui/dialogs/`)
 
+- `wall_layout_settings.py`: Grouped live wall preferences, shared by the dedicated panel and main Settings dialog.
+
 - `settings_dialog.py`: App settings UI.
 - `export_dialog.py`: Export workflow dialog.
 - `caption_multiple_images_dialog.py`: Batch caption dialog.
@@ -116,6 +119,9 @@ TagGUI is a desktop app for image/video tagging, captioning, and dataset prepara
 ### Controllers (`taggui/controllers/`)
 
 - `menu_manager.py`: Main menu wiring.
+- `wall_resize_preview.py`: Cancellable resize ghosts matching release-time constraints.
+- `floating_resize_input.py`: Viewer border input priority over overlay child controls.
+- `wall_anchor_controller.py`: Ctrl-drag input, snapping, cancellable ghost previews and anchor indicators.
 - `floating_wall_controller.py`: Wall packing options, kept sizes, manual mode, and cancellable background reflow.
 - `toolbar_manager.py`: Toolbar wiring.
 - `signal_manager.py`: Signal/slot wiring.

@@ -44,7 +44,7 @@ Spawn actions are blocked while the main viewer is in fullscreen mode.
 - Both masonry flows use `Settings -> Advanced -> Floating masonry alignment`.
 - `Arrange as Masonry Wall` uses the default rearrange order from `Settings -> Advanced -> Rearrange preserves screen order`.
 - Wall packing, automatic sizing, and resize reflow are configurable in `Settings -> Advanced -> Floating Wall Layout` and the wall right-click menu.
-- Hold `Alt` to skip resize reflow for one gesture. `Ctrl+Alt+M` toggles Manual Wall Layout until toggled again; the shortcut is configurable.
+- Hold `Alt` to skip resize reflow for one gesture. `Ctrl+Alt+M` toggles the saved automatic resize arrangement setting; the shortcut is configurable in Wall settings.
 - Manually resized sizes are kept by default. The wall menu can release one kept size or reset all kept sizes. See [Packing and Automatic Reflow](MASONRY_REVIEW_WALL_GUIDE.md#packing-and-automatic-reflow).
 - Right-click a Masonry Wall window and toggle `Masonry wall controls` live.
 - `Open in Masonry Wall` starts with the wall controls on.

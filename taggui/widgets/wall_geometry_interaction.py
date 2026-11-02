@@ -14,7 +14,7 @@ class WallGeometryInteraction:
         if controller is not None:
             controller.cancel()
             if (getattr(self, '_selection_masonry_wall_window', False)
-                    and controller.manual_action.isChecked()):
+                    and not controller.automatic_layout_enabled):
                 self._wall_skip_reflow = True
 
     def _track_wall_geometry_gesture(self, event=None):
@@ -23,9 +23,14 @@ class WallGeometryInteraction:
         if modifiers & Qt.KeyboardModifier.AltModifier:
             # Latch for the entire gesture, even if Alt is released first.
             self._wall_skip_reflow = True
+            controller = self._wall_controller()
+            if controller is not None:
+                controller.resize_preview.cancel()
 
     def _finish_wall_resize(self, previous, event=None, *, commit=True):
         self._track_wall_geometry_gesture(event)
         controller = self._wall_controller()
+        if controller is not None:
+            controller.resize_preview.cancel()
         if commit and controller is not None and self.geometry().size() != previous.size():
             controller.resize_finished(self, bool(getattr(self, '_wall_skip_reflow', False)))

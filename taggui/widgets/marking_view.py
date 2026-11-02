@@ -371,6 +371,7 @@ class ImageGraphicsView(QGraphicsView):
                         menu.addSeparator()
                     marking_group = QActionGroup(menu)
                     change_to_hint_action = QAction('Hint', marking_group)
+                    change_to_hint_action.setEnabled(not self.image_viewer.is_spawned_viewer)
                     change_to_hint_action.setCheckable(True)
                     change_to_hint_action.setChecked(item.rect_type == ImageMarking.HINT)
                     change_to_hint_action.triggered.connect(
@@ -413,6 +414,9 @@ class ImageGraphicsView(QGraphicsView):
         self.scene().clear()
 
     def set_insertion_mode(self, marking: ImageMarking):
+        if marking == ImageMarking.HINT and self.image_viewer.is_spawned_viewer:
+            marking = ImageMarking.NONE
+            self.image_viewer.marking_to_add = ImageMarking.NONE
         old_insertion_mode = self.insertion_mode
         self.insertion_mode = marking != ImageMarking.NONE
         if self.insertion_mode:
@@ -556,6 +560,11 @@ class ImageGraphicsView(QGraphicsView):
                     rect_type = ImageMarking.EXCLUDE
                 else:
                     rect_type = ImageMarking.HINT
+
+            if rect_type == ImageMarking.HINT and self.image_viewer.is_spawned_viewer:
+                self.set_insertion_mode(ImageMarking.NONE)
+                event.accept()
+                return
 
             proxy_index = self.image_viewer.proxy_image_index
             source_model = proxy_index.model().sourceModel() if proxy_index.isValid() else None

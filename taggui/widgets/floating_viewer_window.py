@@ -1561,13 +1561,15 @@ class FloatingViewerWindow(WallGeometryInteraction, QWidget):
                 wall_controls_action = menu.addAction("Masonry wall controls")
                 wall_controls_action.setCheckable(True)
                 wall_controls_action.setChecked(wall_controls_checked)
-        if callable(arrange_windows):
+        if callable(arrange_windows) and not getattr(self, '_selection_masonry_wall_window', False):
             arrange_action = menu.addAction("Arrange as Masonry Wall")
         controller = getattr(parent, '_wall_layout', None)
         if controller is not None and bool(getattr(self, '_selection_masonry_wall_window', False)):
             controller.add_menu(menu, self)
         close_all_action = menu.addAction("Close all spawned viewers")
         selected = menu.exec(global_pos)
+        if selected is None:
+            return
         if exit_compare_action is not None and selected is exit_compare_action:
             self.compare_exit_requested.emit(self.viewer)
         elif selected in fit_mode_map:

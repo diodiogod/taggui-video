@@ -79,7 +79,7 @@ def pack_wall(
     aspect_ratios, bounds, *, algorithm='Best fit', spacing=6,
     horizontal_alignment='center', preferred_sizes=None, fixed_sizes=None,
     minimum_sizes=None, automatic_sizing=True, preserve_order=False,
-    previous_rects=None, cancelled=None,
+    previous_rects=None, cancelled=None, anchored_rects=None, anchor_preview=False,
 ):
     """Find a feasible layout; fixed sizes are hard constraints, never hints.
 
@@ -87,6 +87,13 @@ def pack_wall(
     MaxRects chooses positions only; this search supplies its rectangle sizes.
     Empty results mean no candidate fits and callers must retain the old layout.
     """
+    if anchored_rects and any(r is not None for r in anchored_rects):
+        from widgets.wall_anchor_packing import pack_anchored_wall
+        return pack_anchored_wall(
+            aspect_ratios, bounds, anchored_rects, spacing=spacing,
+            preferred_sizes=preferred_sizes, fixed_sizes=fixed_sizes,
+            minimum_sizes=minimum_sizes, automatic_sizing=automatic_sizing,
+            previous_rects=previous_rects, cancelled=cancelled, anchor_preview=anchor_preview)
     count = len(aspect_ratios)
     missing = not maxrects_available()
     if not count or not bounds.isValid():

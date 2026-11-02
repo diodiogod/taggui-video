@@ -5146,6 +5146,8 @@ class ImageViewer(QWidget):
     @Slot()
     def change_marking(self, items: list[MarkingItem] | None = None,
                        new_marking: ImageMarking = ImageMarking.NONE):
+        if self.is_spawned_viewer and new_marking == ImageMarking.HINT:
+            return
         _proxy_index, source_model, image = self.get_live_image_context()
         if source_model is None or image is None:
             return
@@ -5176,6 +5178,8 @@ class ImageViewer(QWidget):
                               }[item.rect_type]
             else:
                 target_type = new_marking
+            if self.is_spawned_viewer and target_type == ImageMarking.HINT:
+                target_type = ImageMarking.EXCLUDE
             self._rename_default_marking_label(item, target_type)
             item.set_rect_type(target_type)
             # Changing the marking type can change membership in a marking
@@ -5341,6 +5345,9 @@ class ImageViewer(QWidget):
     def add_rectangle(self, rect: QRect, rect_type: ImageMarking,
                       interactive: bool, size: QSize = None, name: str = '',
                       confidence: float = 1.0):
+        if interactive and rect_type == ImageMarking.HINT and self.is_spawned_viewer:
+            self.view.set_insertion_mode(ImageMarking.NONE)
+            return
         self.marking_to_add = ImageMarking.NONE
         if (
             not interactive

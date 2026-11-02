@@ -154,7 +154,7 @@ def sizing_modes():
 
 def manual_control():
     figure = Illustration('Take manual control.',
-                          'Use a one-gesture bypass or leave Manual Wall Layout on for several adjustments.', 850)
+                          'Skip one gesture with Alt, or turn off automatic arrangement for several adjustments.', 850)
     for x in (44, 804):
         figure.rect(x, 160, 688, 608, '#ffffff', 18, '#dce4ee')
     figure.text(76, 211, 'Hold Alt for one gesture', 30, weight=700)
@@ -168,8 +168,8 @@ def manual_control():
                       'C': (486, 70, 96, 96)}.items():
         figure.media((76, 438), name, box, resizing=name == 'A')
     figure.text(76, 698, 'Alt may be released before the mouse.', 22, weight=700)
-    figure.text(76, 733, 'Moving a window alone never triggers reflow.', 20, MUTED)
-    figure.text(836, 211, 'Toggle Manual Wall Layout', 30, weight=700)
+    figure.text(76, 733, 'Ordinary dragging does not trigger reflow.', 20, MUTED)
+    figure.text(836, 211, 'Toggle automatic arrangement', 30, weight=700)
     for x, label, width in ((836, 'Ctrl', 136), (1010, 'Alt', 126), (1174, 'M', 94)):
         figure.key(x, 246, label, width, 78)
     figure.text(986, 297, '+', 29, MUTED, anchor='middle')
@@ -178,13 +178,13 @@ def manual_control():
     figure.text(836, 373, 'Make several adjustments at your own pace.', 23, weight=700)
     figure.text(836, 408, 'Automatic rearrangement stays suspended.', 22, MUTED)
     figure.rect(836, 451, 624, 90, '#e4edf8', 12)
-    figure.text(860, 505, 'Manual Wall Layout', 26, weight=700)
-    figure.rect(1310, 475, 126, 42, '#158067', 21)
-    figure.text(1334, 503, 'ON', 21, '#ffffff', 700)
-    figure.add('<circle cx="1413" cy="496" r="15" fill="#ffffff"/>')
-    figure.text(836, 584, 'Toggle it off when you are ready.', 24, weight=700)
+    figure.text(860, 505, 'Automatic resize arrangement', 24, weight=700)
+    figure.rect(1310, 475, 126, 42, '#687789', 21)
+    figure.text(1367, 503, 'OFF', 21, '#ffffff', 700)
+    figure.add('<circle cx="1333" cy="496" r="15" fill="#ffffff"/>')
+    figure.text(836, 584, 'Toggle it on when you are ready.', 24, weight=700)
     figure.text(836, 619, 'Automatic reflow resumes on the next resize.', 22, MUTED)
-    figure.text(836, 698, 'Repack current wall works even in manual mode.', 21, weight=700)
+    figure.text(836, 698, 'Arrange now works with automatic mode off.', 21, weight=700)
     figure.text(836, 733, 'Use the wall menu for a deliberate repack.', 20, MUTED)
     figure.text(44, 818, 'Illustrated examples. Default shortcut: Ctrl+Alt+M. Shift still controls aspect preservation.', 20, MUTED)
     figure.save('wall-manual-controls')

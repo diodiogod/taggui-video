@@ -140,7 +140,7 @@ def test_user_can_resize_without_reflow(opened_wall, mode):
     host, windows = opened_wall
     controller = host._wall_layout
     if mode == 'manual':
-        controller.manual_action.setChecked(True)
+        controller.auto_arrange_action.setChecked(False)
     elif mode == 'disabled':
         settings.setValue('floating_wall_reflow_after_resize', False)
     before = [QRect(w.geometry()) for w in windows]
@@ -175,11 +175,11 @@ def test_preservation_can_be_disabled_and_reset_releases_all_sizes(opened_wall):
     finish_reflow(controller)
     assert windows[0].size() != original_manual_size
     controller._keep_size(windows[1], True)
-    controller.manual_action.setChecked(True)
+    controller.auto_arrange_action.setChecked(False)
     controller.request_reflow(force=True, reset_sizes=True)
     finish_reflow(controller)
     assert all(controller._fixed_size(w) is None for w in windows)
-    assert controller.manual_action.isChecked()
+    assert not controller.auto_arrange_action.isChecked()
     assert valid_layout([w.geometry() for w in windows], windows[0].screen().availableGeometry(), 6)
 
 
@@ -202,7 +202,7 @@ def test_manual_drag_moves_only_its_window_and_suppresses_compare_merge(opened_w
     host, windows = opened_wall
     controller = host._wall_layout
     if mode == 'manual':
-        controller.manual_action.setChecked(True)
+        controller.auto_arrange_action.setChecked(False)
     before = [QRect(w.geometry()) for w in windows]
     started = []
     windows[0].compare_drag_started.connect(lambda *args: started.append(args))
@@ -237,27 +237,29 @@ def test_custom_zoom_is_restored_with_proportional_scale_on_resized_siblings(ope
 def test_live_menu_keeps_defaults_and_session_override_separate(opened_wall):
     host, windows = opened_wall
     controller = host._wall_layout
-    controller.manual_action.setChecked(True)
+    controller.auto_arrange_action.setChecked(False)
     menu = QMenu(host)
     try:
         submenu = controller.add_menu(menu, windows[0])
         actions = {action.text(): action for action in submenu.actions()}
-        actions['Automatically size other windows'].trigger()
-        assert not settings.value('floating_wall_automatic_sizing', type=bool)
-        settings.setValue('floating_wall_automatic_sizing', True)
-        assert actions['Automatically size other windows'].isChecked()
+        assert not actions['Arrange automatically after resizing'].isChecked()
+        settings.setValue('floating_wall_reflow_after_resize', True)
+        assert actions['Arrange automatically after resizing'].isChecked()
+        actions['Arrange automatically after resizing'].trigger()
+        assert not settings.value('floating_wall_reflow_after_resize', type=bool)
         algorithms = actions['Packing algorithm (this session)'].menu()
         next(a for a in algorithms.actions() if a.text() == 'Masonry').trigger()
         assert controller.algorithm == 'Masonry'
         assert settings.value('floating_wall_algorithm') == 'Best fit'
         assert len([action for action in algorithms.actions() if action.isChecked()]) == 1
-        actions["Keep this window's size"].trigger()
+        modes = {a.text(): a for a in actions['This window'].menu().actions()}
+        modes['Keep size'].trigger()
         assert controller._fixed_size(windows[0]) == (windows[0].width(), windows[0].height())
         assert all(controller._fixed_size(w) is None for w in windows[1:])
-        actions["Keep this window's size"].trigger()
+        modes['Flexible'].trigger()
         assert controller._fixed_size(windows[0]) is None
         settings.setValue('floating_wall_manual_shortcut', 'Ctrl+Alt+J')
-        assert controller.manual_action.shortcut().toString() == 'Ctrl+Alt+J'
+        assert controller.auto_arrange_action.shortcut().toString() == 'Ctrl+Alt+J'
     finally:
         dispose_widget(menu)
 
@@ -267,34 +269,35 @@ def test_manual_shortcut_works_from_a_floating_viewer(opened_wall):
     windows[-1].activateWindow()
     APP.processEvents()
     QTest.keyClick(windows[-1], Qt.Key_M, Qt.ControlModifier | Qt.AltModifier)
-    assert host._wall_layout.manual_action.isChecked()
+    assert not host._wall_layout.auto_arrange_action.isChecked()
     QTest.keyClick(windows[-1], Qt.Key_M, Qt.ControlModifier | Qt.AltModifier)
-    assert not host._wall_layout.manual_action.isChecked()
+    assert host._wall_layout.auto_arrange_action.isChecked()
 
 
 def test_wall_settings_controls_persist_their_actual_values():
-    from dialogs.settings_dialog import SettingsDialog
+    from dialogs.wall_layout_settings import WallLayoutSettings
     from PySide6.QtGui import QKeySequence
-    settings.setValue('floating_wall_algorithm', 'Best fit')
-    group = SettingsDialog._create_wall_layout_settings(None)
+    panel = WallLayoutSettings()
+    sibling_panel = WallLayoutSettings()
     try:
-        grid = group.layout()
-        grid.itemAtPosition(0, 1).widget().setCurrentText('MaxRects')
+        assert not panel.advanced.isVisible()
+        panel.controls['floating_wall_algorithm'].setCurrentText('MaxRects')
         assert settings.value('floating_wall_algorithm') == 'MaxRects'
-        for row, key in ((1, 'floating_wall_reflow_after_resize'),
-                         (2, 'floating_wall_automatic_sizing'),
-                         (3, 'floating_wall_preserve_manual_sizes')):
-            control = grid.itemAtPosition(row, 1).widget()
+        for key, control in panel.controls.items():
+            if not isinstance(DEFAULT_SETTINGS[key], bool):
+                continue
             control.setChecked(False)
             assert not settings.value(key, type=bool)
+            assert not sibling_panel.controls[key].isChecked()
             control.setChecked(True)
             assert settings.value(key, type=bool)
-        shortcut = grid.itemAtPosition(4, 1).widget()
-        shortcut.setKeySequence(QKeySequence('Ctrl+Alt+J'))
-        shortcut.editingFinished.emit()
+            assert sibling_panel.controls[key].isChecked()
+        panel.shortcut.setKeySequence(QKeySequence('Ctrl+Alt+J'))
+        panel.shortcut.editingFinished.emit()
         assert settings.value('floating_wall_manual_shortcut') == 'Ctrl+Alt+J'
     finally:
-        dispose_widget(group)
+        dispose_widget(sibling_panel)
+        dispose_widget(panel)
 
 
 def test_alt_is_latched_even_when_released_before_the_mouse(opened_wall):
@@ -358,9 +361,9 @@ def test_manual_feedback_and_explicit_arrange_failure_never_add_a_status_row(ope
     host, windows = opened_wall
     assert host.findChild(QStatusBar) is None
     central_geometry = QRect(host.centralWidget().geometry())
-    host._wall_layout.manual_action.setChecked(True)
-    assert 'Manual wall layout' in QToolTip.text()
-    host._wall_layout.manual_action.setChecked(False)
+    host._wall_layout.auto_arrange_action.setChecked(False)
+    assert 'arrangement off' in QToolTip.text()
+    host._wall_layout.auto_arrange_action.setChecked(True)
     windows[0].resize(windows[0].screen().availableGeometry().width() + 100, windows[0].height())
     host._wall_layout.resize_finished(windows[0], True)
     assert host.arrange_floating_windows_as_masonry() == []
@@ -387,7 +390,7 @@ def test_late_worker_result_cannot_override_manual_changes_or_deleted_window(ope
     pump(started.is_set)
     try:
         if interrupt == 'manual':
-            controller.manual_action.setChecked(True)
+            controller.auto_arrange_action.setChecked(False)
         elif interrupt == 'move':
             windows[0].move(windows[0].pos() + QPoint(20, 10))
         else:
