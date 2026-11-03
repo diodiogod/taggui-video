@@ -33,6 +33,7 @@ set SKIP_GIT=0
 set CLEAR_CACHE=0
 set CLEAN_OLD=0
 set REFRESH_TORCH=0
+set "PROBE_ARGS="
 set ENABLE_CRASH_DIAG=0
 set CUDA_OVERRIDE=
 set APP_ARGS=
@@ -328,6 +329,7 @@ if %SHOULD_INSTALL% EQU 1 (
     )
 ) else (
     echo Virtual environment already exists, skipping installation
+    echo To recheck CUDA now, run: start_windows.bat --check-cuda
     echo To refresh the Torch stack in this venv, run: start_windows.bat --refresh-torch
     echo If CUDA detection is wrong, you can force the wheel channel: start_windows.bat --refresh-torch --cuda=cu128
 )
@@ -384,13 +386,15 @@ exit /b %EXITCODE%
 
 :ensure_onnxruntime
 set ONNX_PACKAGE=onnxruntime
-python -c "import torch; raise SystemExit(0 if torch.cuda.is_available() else 1)" >nul 2>&1
+
+if !SHOULD_REFRESH_TORCH! EQU 1 set "PROBE_ARGS=--refresh"
+python scripts/windows_cuda_probe.py !PROBE_ARGS! >nul 2>&1
 if !ERRORLEVEL! EQU 0 set ONNX_PACKAGE=onnxruntime-gpu
 
 if /I "!ONNX_PACKAGE!"=="onnxruntime-gpu" (
-    python -c "import onnxruntime as ort; import importlib.metadata as md; providers=set(ort.get_available_providers()); names={dist.metadata['Name'].lower() for dist in md.distributions()}; raise SystemExit(0 if 'CUDAExecutionProvider' in providers and 'onnxruntime-gpu' in names else 1)" >nul 2>&1
+    python -c "import onnxruntime as ort; import importlib.metadata as md; providers=set(ort.get_available_providers()); md.distribution('!ONNX_PACKAGE!'); raise SystemExit(0 if 'CUDAExecutionProvider' in providers else 1)" >nul 2>&1
 ) else (
-    python -c "import onnxruntime as ort; import importlib.metadata as md; providers=set(ort.get_available_providers()); names={dist.metadata['Name'].lower() for dist in md.distributions()}; raise SystemExit(0 if 'onnxruntime' in names and 'CUDAExecutionProvider' not in providers else 1)" >nul 2>&1
+    python -c "import onnxruntime as ort; import importlib.metadata as md; providers=set(ort.get_available_providers()); md.distribution('!ONNX_PACKAGE!'); raise SystemExit(0 if 'CUDAExecutionProvider' not in providers else 1)" >nul 2>&1
 )
 if !ERRORLEVEL! EQU 0 exit /b 0
 
@@ -455,6 +459,10 @@ if /I "%~1"=="--clear-cache" set CLEAR_CACHE=1
 if /I "%~1"=="--clear-cache" set FORWARD_ARG=0
 if /I "%~1"=="--clean-old" set CLEAN_OLD=1
 if /I "%~1"=="--clean-old" set FORWARD_ARG=0
+if /I "%~1"=="--check-cuda" (
+    set "PROBE_ARGS=--refresh"
+    set FORWARD_ARG=0
+)
 if /I "%~1"=="--refresh-torch" set REFRESH_TORCH=1
 if /I "%~1"=="--refresh-torch" set FORWARD_ARG=0
 if /I "%~1"=="--crash-log" set ENABLE_CRASH_DIAG=1
