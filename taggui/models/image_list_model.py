@@ -63,7 +63,7 @@ from utils.ideogram_caption import (
     is_ideogram_caption_dict,
     legacy_ideogram_caption_path,
 )
-from utils.diagnostic_logging import diagnostic_print, diagnostic_time_prefix, should_emit_trace_log
+from utils.diagnostic_logging import append_crash_context, diagnostic_print, diagnostic_time_prefix, should_emit_trace_log
 from utils.pillow_plugins import ensure_pillow_plugins_registered
 from utils.settings import DEFAULT_SETTINGS, settings, parse_image_list_formats
 from utils.text_transform import TextTransformOptions, transform_text
@@ -820,6 +820,15 @@ def get_directory_tree_stats(directory_path: Path, progress_callback=None, *, ca
 def _relative_child_path(parent_rel: str, child_name: str) -> str:
     """Build a normalized relative path for a child entry."""
     return child_name if not parent_rel else f"{parent_rel}/{child_name}"
+
+
+def _trace_new_media_refresh(model, generation, stage):
+    if os.getenv('TAGGUI_ENABLE_FAULTHANDLER') != '1':
+        return
+    append_crash_context(
+        f"[REFRESH_NEW] pid={os.getpid()} tid={threading.get_native_id()} "
+        f"model={id(model):x} generation={generation} stage={stage}"
+    )
 
 
 def _normalize_relative_path(rel_path: str) -> str:
@@ -4717,9 +4726,11 @@ class ImageListModel(QAbstractListModel):
 
         result['supported'] = True
         try:
+            _trace_new_media_refresh(self, generation, 'open-index')
             db = ImageIndexDB(directory_path)
             self._configure_filter_db(db)
             cached_paths = db.get_all_paths()
+            _trace_new_media_refresh(self, generation, f'group-paths count={len(cached_paths)}')
             norm_to_cached_paths: dict[str, list[str]] = {}
             for rel_path in cached_paths:
                 normalized = _normalize_relative_path(rel_path)
@@ -4730,6 +4741,7 @@ class ImageListModel(QAbstractListModel):
                 current_rel_map[normalized] = sorted(set(rel_variants))[0]
             current_rel_paths = set(current_rel_map.keys())
 
+            _trace_new_media_refresh(self, generation, 'check-directories')
             stored_dir_mtimes = db.get_directory_signatures()
             if stored_dir_mtimes:
                 changed_roots = get_changed_directory_roots(directory_path, stored_dir_mtimes)
@@ -4919,6 +4931,7 @@ class ImageListModel(QAbstractListModel):
                 self._new_media_refresh_running = False
 
             result['page_generation'] = page_generation
+            _trace_new_media_refresh(self, generation, 'dispatch-result')
             self.new_media_refresh_finished.emit(result)
 
         self._refresh_executor.submit(worker)
@@ -4926,6 +4939,7 @@ class ImageListModel(QAbstractListModel):
 
     def apply_refresh_new_media_only_result(self, result: dict[str, Any]) -> dict[str, Any]:
         """Apply a completed additions-only refresh result on the UI thread."""
+        _trace_new_media_refresh(self, result.get('generation'), 'apply-result')
         if not result.get('supported', False):
             return result
         if result.get('requires_full_reload', False):
