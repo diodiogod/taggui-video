@@ -783,6 +783,11 @@ class MenuManager(QObject):
         exit_action.triggered.connect(self.main_window.close)
         file_menu.addAction(exit_action)
 
+    def _show_main_generation_prompt(self):
+        from widgets.generation_prompt_dialog import open_generation_prompt
+        viewer = getattr(self.main_window, 'image_viewer', None)
+        open_generation_prompt(self.main_window, getattr(viewer, 'current_media', None))
+
     def _create_edit_menu(self, menu_bar):
         """Create Edit menu."""
         edit_menu = menu_bar.addMenu('Edit')
@@ -1002,6 +1007,8 @@ class MenuManager(QObject):
         view_menu.addAction(self.toggle_pipeline_editor_action)
         view_menu.addAction(self.toggle_quick_sort_panel_action)
         view_menu.addAction(self.toggle_quick_tag_panel_action)
+        generation_prompt_action = view_menu.addAction('Generation Prompt (Main Viewer)...')
+        generation_prompt_action.triggered.connect(self._show_main_generation_prompt)
         view_menu.addSeparator()
         view_menu.addAction(self.toggle_perf_hud_action)
 

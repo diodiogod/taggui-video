@@ -36,6 +36,14 @@ The image context menu includes actions such as copying or pasting tags and movi
 
 Typing letters in the image list no longer jumps selection. Use the filter box when you want text-based searching.
 
+### Generation prompts
+
+Right-click an image or video and choose **Copy Positive Prompt** or **View Generation Prompt...**. The main and floating viewers also have prompt actions in their menus. Select text in the prompt window to copy just that part; multiple or unverified results require a manual choice.
+
+TagGUI reads saved positive metadata, including A1111 parameters, first; it then checks ComfyUI workflows embedded in the file or a matching `.json` sidecar. Simple Prompt is supported, though workflow inputs may differ from text changed at runtime, such as random choices. Video metadata reading requires `ffprobe` on `PATH` and recognizes VideoHelperSuite wrappers and [ComfyUI Video Saver](https://github.com/diodiogod/ComfyUI-Video-Saver) metadata. Reading happens only when requested and does not write to files, captions, or the database. A future opt-in batch import to captions or the database could be added separately.
+
+The reader was informed by [Simple Readable Metadata](https://github.com/ShammiG/ComfyUI-Simple_Readable_Metadata-SG), [Prompt Manager](https://github.com/FranckyB/ComfyUI-Prompt-Manager), [SD Prompt Reader Node](https://github.com/receyuki/comfyui-prompt-reader-node), and [Prompt Viewer](https://github.com/Jasshl/ComfyUI-Prompt-Viewer).
+
 ## Main Viewer Fullscreen
 
 - Toggle fullscreen for the main viewer: `F`

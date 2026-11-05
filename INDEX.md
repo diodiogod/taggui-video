@@ -33,6 +33,7 @@ TagGUI is a desktop app for image/video tagging, captioning, and dataset prepara
 - `docs/PIPELINES_GUIDE.md`: Pipeline creation, step configuration, linking, execution, and import/export guide.
 - `docs/MARKINGS_GUIDE.md`: Manual and automatic marking workflows, class actions, and model safety notes.
 - `docs/QUICK_SORT_GUIDE.md`: Zero-setup keyboard sorting, named destination overrides, qualifier routing, file handling, and session controls.
+- `docs/SHORTCUTS.md`: Keyboard shortcuts, quick actions, and on-demand generation prompt reading.
 - `docs/TEXT_TRANSFORM_SPATIAL_REVIEW_GUIDE.md`: Configurable text swaps/replacements, manual spatial review, quick corrections, radial gestures, and settings.
 
 ## Archived Docs (`docs/archive/`)
@@ -89,6 +90,7 @@ TagGUI is a desktop app for image/video tagging, captioning, and dataset prepara
 - `wall_geometry_interaction.py`: Shared manual wall resize and Alt-bypass gesture handling.
 - `image_tags_editor.py`: Tag editing panel plus quick Ideogram caption list/JSON editing, caption creation, and full-editor handoff.
 - `ideogram_caption_editor.py`: Responsive structured-caption inspector with scene/element editing, palettes, autosave state, raw JSON, and persistent Ctrl+wheel UI zoom.
+- `generation_prompt_dialog.py`: On-demand, non-persistent generation prompt viewer and copy controls.
 - `all_tags_editor.py`: Bulk/all-tags editor.
 - `auto_captioner.py`: Auto-caption UI integration.
 - `auto_markings.py`: Responsive auto-marking panel with persistent Ctrl+wheel UI zoom, model picker, class-to-label/action mapping, advanced inference controls, and run status/log UI.
@@ -159,6 +161,7 @@ TagGUI is a desktop app for image/video tagging, captioning, and dataset prepara
 - `crop_applier.py`: Crop application utilities.
 - `target_dimension.py`: Dimension target helpers.
 - `prompt_history.py`: Prompt history persistence.
+- `generation_prompt.py`: On-demand ComfyUI workflow and generation metadata prompt extraction.
 - `field_history.py`: Field history persistence.
 - `focused_scroll_mixin.py`: Focused scrolling behavior.
 - `key_press_forwarder.py`: Key-forwarding utilities.

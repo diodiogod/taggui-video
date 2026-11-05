@@ -1512,6 +1512,10 @@ class FloatingViewerWindow(WallGeometryInteraction, QWidget):
 
     def _show_window_menu(self, global_pos: QPoint):
         menu = QMenu(self)
+        prompt_media = getattr(self.viewer, 'current_media', None)
+        prompt_action = menu.addAction('View / Copy Generation Prompt...')
+        prompt_action.setEnabled(prompt_media is not None)
+        menu.addSeparator()
         exit_compare_action = None
         fit_mode_map = {}
         arrange_action = None
@@ -1570,7 +1574,10 @@ class FloatingViewerWindow(WallGeometryInteraction, QWidget):
         selected = menu.exec(global_pos)
         if selected is None:
             return
-        if exit_compare_action is not None and selected is exit_compare_action:
+        if selected is prompt_action:
+            from widgets.generation_prompt_dialog import open_generation_prompt
+            open_generation_prompt(self, prompt_media)
+        elif exit_compare_action is not None and selected is exit_compare_action:
             self.compare_exit_requested.emit(self.viewer)
         elif selected in fit_mode_map:
             setter = getattr(self.viewer, "set_compare_fit_mode", None)

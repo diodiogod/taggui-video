@@ -405,6 +405,12 @@ class ImageListView(
         self.copy_paths_action.setShortcut('Ctrl+Shift+C')
         self.copy_paths_action.triggered.connect(
             self.copy_selected_image_paths)
+        self.copy_generation_prompt_action = self.addAction('Copy Positive Prompt')
+        self.copy_generation_prompt_action.triggered.connect(
+            lambda: self.open_selected_generation_prompt(copy_on_load=True))
+        self.view_generation_prompt_action = self.addAction('View Generation Prompt...')
+        self.view_generation_prompt_action.triggered.connect(
+            self.open_selected_generation_prompt)
         self.move_images_action = self.addAction('Move Images to...')
         self.move_images_action.setShortcut('Ctrl+M')
         self.move_images_action.triggered.connect(
@@ -451,6 +457,8 @@ class ImageListView(
         self.context_menu.addAction(paste_tags_action)
         self.context_menu.addAction(self.copy_file_names_action)
         self.context_menu.addAction(self.copy_paths_action)
+        self.context_menu.addAction(self.copy_generation_prompt_action)
+        self.context_menu.addAction(self.view_generation_prompt_action)
         self.context_menu.addSeparator()
         self.context_menu.addAction(self.refresh_new_media_context_action)
         self.context_menu.addAction(self.move_images_action)

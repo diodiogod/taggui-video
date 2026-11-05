@@ -62,6 +62,16 @@ def _release_video_players_for_paths(main_window, target_paths) -> bool:
 
 
 class ImageListViewFileOpsMixin:
+    def open_selected_generation_prompt(self, *, copy_on_load=False):
+        """Capture the selected image before starting asynchronous metadata I/O."""
+        if self.get_selected_image_count() != 1:
+            return
+        images = self.get_selected_images()
+        if len(images) != 1 or images[0] is None:
+            return
+        from widgets.generation_prompt_dialog import open_generation_prompt
+        open_generation_prompt(self._main_window_host(), images[0], copy_on_load=copy_on_load)
+
     def get_selected_proxy_indices(self) -> list[QModelIndex]:
         """Return unique selected proxy indices in visual row order."""
         selected_indices = []
@@ -661,6 +671,8 @@ class ImageListViewFileOpsMixin:
         self.delete_images_action.setText(delete_images_action_name)
         self.open_selection_masonry_wall_action.setVisible(selected_image_count >= 2)
         self.open_image_action.setVisible(selected_image_count == 1)
+        self.copy_generation_prompt_action.setEnabled(selected_image_count == 1)
+        self.view_generation_prompt_action.setEnabled(selected_image_count == 1)
         self.open_folder_action.setVisible(selected_image_count >= 1)
         browser_label = 'Browser 2' if getattr(self, '_secondary_browser_owner', None) is not None else 'Browser 1'
         self.refresh_new_media_context_action.setText(f'Refresh New Media for {browser_label}')
