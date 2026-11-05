@@ -1,7 +1,35 @@
 """Discreet corner buttons for releasing individual wall constraints."""
-from PySide6.QtCore import QEvent, QPointF, Qt
+from PySide6.QtCore import QEvent, QPointF, QRectF, Qt
 from PySide6.QtGui import QColor, QPainter, QPainterPath, QPen
 from PySide6.QtWidgets import QAbstractButton
+
+
+PIN_HIGHLIGHT_COLOR = '#a52b3a'
+
+
+def paint_pin(painter, rect, ink, shadow, *, fill=None):
+    """Share the same pin shape between the corner button and drag feedback."""
+    painter.save()
+    painter.translate(rect.x(), rect.y())
+    painter.scale(rect.width() / 18, rect.height() / 18)
+    painter.translate(9, 9)
+    painter.rotate(30)
+    painter.translate(-9, -9)
+    path = QPainterPath()
+    path.moveTo(6, 2.5)
+    path.lineTo(12, 2.5)
+    path.lineTo(11, 7.5)
+    path.lineTo(13, 10)
+    path.lineTo(5, 10)
+    path.lineTo(7, 7.5)
+    path.closeSubpath()
+    path.moveTo(9, 10)
+    path.lineTo(9, 16)
+    for color, width in ((shadow, 2.7), (ink, 1.2)):
+        painter.setBrush(Qt.NoBrush if fill is None or color == shadow else fill)
+        painter.setPen(QPen(color, width, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin))
+        painter.drawPath(path)
+    painter.restore()
 
 
 class WallConstraintIndicator(QAbstractButton):
@@ -63,19 +91,5 @@ class WallConstraintIndicator(QAbstractButton):
                 painter.setPen(QPen(color, width, Qt.SolidLine, Qt.RoundCap))
                 painter.drawPoints(points)
         else:
-            painter.translate(9, 9)
-            painter.rotate(30)
-            painter.translate(-9, -9)
-            path.moveTo(6, 2.5)
-            path.lineTo(12, 2.5)
-            path.lineTo(11, 7.5)
-            path.lineTo(13, 10)
-            path.lineTo(5, 10)
-            path.lineTo(7, 7.5)
-            path.closeSubpath()
-            path.moveTo(9, 10)
-            path.lineTo(9, 16)
-            for color, width in ((shadow, 2.7), (ink, 1.2)):
-                painter.setPen(QPen(color, width, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin))
-                painter.drawPath(path)
+            paint_pin(painter, QRectF(self.rect()), ink, shadow)
         painter.end()

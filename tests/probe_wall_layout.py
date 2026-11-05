@@ -175,13 +175,27 @@ def test_native_reflow_preserves_playback_and_toggle_during_pending_layout(tmp_p
         check_visible_frames('after-toggle')
         # Real Ctrl-drag input on the live backend: siblings remain still until release.
         anchors = host._wall_layout.anchors
+        # Keep this native fixture visible above other desktop apps during input
+        # and pixel checks; QTest mouse delivery alone does not activate Windows.
+        import ctypes
+        from ctypes import wintypes
+        position = ctypes.windll.user32.SetWindowPos
+        position.argtypes = [wintypes.HWND, wintypes.HWND, ctypes.c_int, ctypes.c_int,
+                             ctypes.c_int, ctypes.c_int, ctypes.c_uint]
+        position.restype = wintypes.BOOL
+        for window in windows:
+            assert position(int(window.winId()), wintypes.HWND(-1), 0, 0, 0, 0, 0x0013)
+        windows[2].raise_()
+        windows[2].activateWindow()
+        QTest.qWait(200)
         target = windows[2].viewer.view.viewport()
         point = target.rect().center()
         siblings = [QRect(w.geometry()) for w in windows]
         QTest.mousePress(target, Qt.LeftButton, Qt.ControlModifier, point)
         assert anchors.drag is not None
         QTest.mouseMove(target, point + QPoint(2, 0))
-        pump(lambda: anchors.drag['result'] is not None, seconds=10)
+        pump(lambda: anchors.drag is None or anchors.drag['result'] is not None, seconds=10)
+        assert anchors.drag is not None, 'Native anchor gesture was cancelled before preview'
         assert anchors.drag['result'] is not False
         assert [w.geometry() for w in windows[:2]] == siblings[:2]
         assert anchors.overlay.isVisible()
@@ -192,6 +206,39 @@ def test_native_reflow_preserves_playback_and_toggle_during_pending_layout(tmp_p
         assert all(p.is_playing == initial_paused for p in players)
         assert valid_layout([w.geometry() for w in windows], windows[0].screen().availableGeometry(), 6)
         check_visible_frames('after-anchor')
+        # A second real gesture highlights both the existing pin and the prospective pin.
+        pin_source = windows[3]
+        pin_target = pin_source.viewer.view.viewport()
+        pin_point = pin_target.rect().center()
+        QTest.mousePress(pin_target, Qt.LeftButton, Qt.ControlModifier, pin_point)
+        assert anchors.drag is not None and len(anchors.overlay.pin_rects) == 2
+        assert not windows[2]._wall_anchor_indicator.isVisible()
+        QTest.qWait(100)
+        for pin_rect in anchors.overlay.pin_rects:
+            screen = anchors.overlay.screen()
+            pixels = screen.grabWindow(0, pin_rect.x()-screen.geometry().x(),
+                                       pin_rect.y()-screen.geometry().y(),
+                                       pin_rect.width(), pin_rect.height()).toImage()
+            assert_capture_contains_color(pixels, (165,43,58), minimum_fraction=.04)
+        feedback_output = os.environ.get('TAGGUI_PIN_FEEDBACK_OUTPUT')
+        if feedback_output:
+            path = Path(feedback_output)
+            path.mkdir(parents=True, exist_ok=True)
+            for index in (2,3):
+                r = windows[index].geometry()
+                screen = anchors.overlay.screen()
+                capture = screen.grabWindow(0, r.x()-screen.geometry().x(),
+                                            r.y()-screen.geometry().y(), r.width(), r.height())
+                assert capture.save(str(path / f'pin-feedback-{initial_paused}-{index}.png'))
+        QTest.keyClick(pin_target, Qt.Key_Escape)
+        QTest.mouseRelease(pin_target, Qt.LeftButton, Qt.ControlModifier, pin_point)
+        assert anchors.drag is None and not anchors.overlay.isVisible()
+        assert windows[2]._wall_anchor_indicator.isVisible()
+        assert windows[2]._wall_anchor_indicator.width() == 18
+        assert not getattr(pin_source, '_wall_position_anchored', False)
+        assert all(p.is_playing == initial_paused for p in players)
+        check_visible_frames('after-pin-feedback')
+
         # Anchoring must not suppress later real resize-release reflow.
         previous_layout = host._wall_layout.last_result
         resize_gesture(windows[2], QPoint(-40, -30))

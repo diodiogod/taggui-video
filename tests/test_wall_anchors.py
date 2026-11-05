@@ -391,3 +391,85 @@ def test_floating_ctrl_does_not_create_hints_and_still_starts_anchor_drag(opened
     host.image_viewer.add_marking(ImageMarking.HINT)
     assert host.image_viewer.view.insertion_mode
     host.image_viewer.view.set_insertion_mode(ImageMarking.NONE)
+
+
+@pytest.mark.parametrize('outcome', ['accept', 'escape', 'invalid'])
+def test_ctrl_drag_enlarges_red_pins_and_restores_corner_icons(opened_wall, outcome):
+    from qt_test_helpers import assert_capture_contains_color
+    host, windows = opened_wall
+    wall, anchors = host._wall_layout, host._wall_layout.anchors
+    for window in windows:
+        window.resize(max(160, window.minimumWidth()), max(160, window.minimumHeight()))
+    for window in (windows[0], windows[2]):
+        wall.set_window_mode(window, 'pinned')
+    source = windows[1]
+    wall.set_window_mode(source, 'size')
+    originals = [QRect(w.geometry()) for w in windows]
+    target, point = press(source)
+    assert anchors.drag is not None
+    assert len(anchors.overlay.pin_rects) == 3
+    for window in (windows[0], windows[2]):
+        assert not window._wall_anchor_indicator.isVisible()
+    assert not source._wall_size_indicator.isVisible()
+    assert all(r.width() == 28 and r.height() == 28 for r in anchors.overlay.pin_rects)
+    assert all(w.geometry() == r for w, r in zip(windows, originals))
+    settle(anchors)
+    assert anchors.drag['result'] is not False
+    anchors.overlay.raise_()
+    QTest.qWait(80)
+    APP.processEvents()
+    # Check known red pin pixels, away from the red window borders.
+    screen = anchors.overlay.screen()
+    for rect in anchors.overlay.pin_rects:
+        if APP.platformName() == 'windows':
+            capture = screen.grabWindow(0, rect.x()-screen.geometry().x(),
+                                        rect.y()-screen.geometry().y(), rect.width(), rect.height()).toImage()
+        else:
+            local = rect.translated(-anchors.overlay.pos())
+            capture = anchors.overlay.grab(local).toImage()
+        assert_capture_contains_color(capture, (165,43,58), minimum_fraction=.04)
+    if outcome == 'invalid':
+        anchors.update(windows[0].pos()+anchors.drag['offset'], Qt.ShiftModifier)
+        settle(anchors)
+        assert anchors.drag['result'] is False
+    if outcome == 'escape':
+        QTest.keyClick(target, Qt.Key_Escape)
+        QTest.mouseRelease(target, Qt.LeftButton, Qt.ControlModifier, point)
+    else:
+        QTest.mouseRelease(target, Qt.LeftButton, Qt.ControlModifier, point)
+    pump(lambda: anchors.drag is None, seconds=10)
+    assert not anchors.overlay.isVisible() and anchors.overlay.pin_rects == []
+    for window in (windows[0], windows[2]):
+        assert window._wall_anchor_indicator.isVisible()
+        assert window._wall_anchor_indicator.width() == 18
+    if outcome == 'accept':
+        assert wall.window_mode(source) == 'pinned'
+        assert source._wall_anchor_indicator.isVisible()
+        assert source._wall_anchor_indicator.width() == 18
+        # Repositioning an existing pin gives every pinned window the same feedback.
+        again_target, again_point = press(source)
+        assert len(anchors.overlay.pin_rects) == 3
+        assert not source._wall_anchor_indicator.isVisible()
+        QTest.keyClick(again_target, Qt.Key_Escape)
+        QTest.mouseRelease(again_target, Qt.LeftButton, Qt.ControlModifier, again_point)
+        assert wall.window_mode(source) == 'pinned'
+        assert source._wall_anchor_indicator.isVisible()
+        assert source._wall_anchor_indicator.width() == 18
+    else:
+        assert wall.window_mode(source) == 'size'
+        assert source.geometry() == originals[1]
+        assert source._wall_size_indicator.isVisible()
+
+
+def test_hidden_lock_icons_stay_hidden_during_ctrl_drag(opened_wall):
+    from utils.settings import settings
+    host, windows = opened_wall
+    wall = host._wall_layout
+    wall.set_window_mode(windows[0], 'pinned')
+    settings.setValue('floating_wall_constraint_icons', False)
+    target, point = press(windows[1])
+    assert wall.anchors.overlay.anchors
+    assert not wall.anchors.overlay.pin_rects
+    QTest.keyClick(target, Qt.Key_Escape)
+    QTest.mouseRelease(target, Qt.LeftButton, Qt.ControlModifier, point)
+    assert not windows[0]._wall_anchor_indicator.isVisible()

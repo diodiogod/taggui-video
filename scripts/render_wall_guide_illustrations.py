@@ -121,9 +121,9 @@ def resize_reflow():
                     ("A's chosen size is kept.", 'Other windows may move or resize.')][index]
         for row, caption in enumerate(captions):
             figure.text(x, 696 + row * 32, caption, 22, weight=700 if row == 0 else 400)
-    figure.chip(44, 786, 262, 'Reflow after resizing: ON', '#ddefe9')
-    figure.chip(327, 786, 354, 'Preserve manually resized sizes: ON', '#fff0d4')
-    figure.chip(702, 786, 330, 'Automatically size other windows: ON')
+    figure.chip(44, 786, 480, 'Arrange automatically after resizing: ON', '#ddefe9')
+    figure.chip(540, 786, 360, 'Remember sizes I change: ON', '#fff0d4')
+    figure.chip(916, 786, 576, 'Allow other windows to resize: ON')
     figure.text(1490, 856, 'A / B: landscape    C: square    D: portrait', 16, MUTED, anchor='end')
     figure.save('wall-resize-reflow')
 
@@ -139,7 +139,7 @@ def sizing_modes():
            'C': (246, 158, 100, 100), 'D': (460, 44, 80, 160)}
     for x, mode, after, caption in ((44, 'ON', on, 'Unkept windows may move AND resize.'),
                                    (804, 'OFF', off, 'Windows move. Every current size stays fixed.')):
-        figure.text(x, 173, f'Automatic sizing: {mode}', 30, weight=700)
+        figure.text(x, 173, f'Allow other windows to resize: {mode}', 30, weight=700)
         figure.text(x, 210, caption, 21, MUTED)
         for y, label, boxes in ((266, 'Before repack', initial), (646, 'After repack', after)):
             figure.text(x, y - 14, label, 22, weight=700)
@@ -148,7 +148,7 @@ def sizing_modes():
                 figure.media((x, y), name, box, kept=name == 'A')
         figure.text(x, 984, 'A keeps its chosen size.', 22, weight=700)
     figure.rect(44, 1020, 1448, 58, '#fff0d4', 12)
-    figure.text(68, 1057, 'If fixed sizes do not fit: keep the current layout and show a brief tooltip. No permanent UI row.', 21)
+    figure.text(68, 1057, 'If kept sizes do not fit: release a size lock, unpin a window, or choose smaller sizes.', 21)
     figure.save('wall-sizing-options')
 
 

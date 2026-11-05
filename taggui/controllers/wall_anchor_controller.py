@@ -6,6 +6,7 @@ from PySide6.QtWidgets import QApplication, QWidget, QAbstractButton, QLineEdit
 from shiboken6 import isValid
 from utils.latest_task import LatestTask
 from widgets.floating_wall_packing import pack_wall
+from widgets.wall_constraint_indicator import PIN_HIGHLIGHT_COLOR, paint_pin
 
 
 def calculate(payload, cancelled):
@@ -22,6 +23,7 @@ class GhostOverlay(QWidget):
         self.setAttribute(Qt.WA_TransparentForMouseEvents)
         self.rects, self.anchors, self.invalid = [], [], False
         self.focus_rect = None
+        self.pin_rects = []
 
     def paintEvent(self, event):
         painter = QPainter(self)
@@ -31,12 +33,16 @@ class GhostOverlay(QWidget):
             painter.setBrush(QColor(180, 50, 50, 35) if self.invalid else QColor(80, 160, 210, 35))
             painter.drawRect(rect.translated(-origin).adjusted(1, 1, -2, -2))
         painter.setBrush(Qt.NoBrush)
-        painter.setPen(QPen(QColor('#a52b3a'), 4))
+        painter.setPen(QPen(QColor(PIN_HIGHLIGHT_COLOR), 4))
         for rect in self.anchors:
             painter.drawRect(rect.translated(-origin).adjusted(2, 2, -3, -3))
         if self.focus_rect is not None:
             painter.setPen(QPen(QColor('#efbb58'), 3, Qt.DashLine))
             painter.drawRect(self.focus_rect.translated(-origin).adjusted(2, 2, -3, -3))
+        painter.setRenderHint(QPainter.Antialiasing)
+        for rect in self.pin_rects:
+            paint_pin(painter, rect.translated(-origin), QColor(PIN_HIGHLIGHT_COLOR),
+                      QColor(255, 255, 255, 150), fill=QColor(165, 43, 58, 95))
         painter.end()
 
 
@@ -75,11 +81,13 @@ class WallAnchorController(QObject):
         self.timer.stop()
         self.worker.cancel()
         self.overlay.hide()
+        self.overlay.pin_rects = []
         if drag:
             window = drag['source']()
             if window is not None and isValid(window):
                 window.move(drag['original'].topLeft())
                 window.releaseMouse()
+            self.wall._refresh_menus()
 
     def begin(self, window, position):
         self.wall.cancel()
@@ -95,6 +103,7 @@ class WallAnchorController(QObject):
                          released=False, snap=[None, None], screen=screen,
                          screen_bounds=QRect(screen.availableGeometry()))
         self.overlay.setGeometry(screen.availableGeometry())
+        self.wall._refresh_menus()
         window.grabMouse()
         self.update(position, Qt.NoModifier)
 
@@ -133,6 +142,14 @@ class WallAnchorController(QObject):
             if not self.timer.isActive():
                 self.timer.start()
         self.overlay.anchors = [QRect(w.geometry()) for w in others] + [QRect(window.geometry())]
+        self.overlay.pin_rects = []
+        if self.wall.setting('floating_wall_constraint_icons'):
+            for geometry in self.overlay.anchors:
+                side = min(28, max(1, geometry.width() - 4), max(1, geometry.height() - 4))
+                inset_x = max(0, min(14, geometry.width() - side - 2))
+                inset_y = max(0, min(14, geometry.height() - side - 2))
+                self.overlay.pin_rects.append(QRect(
+                    geometry.left() + inset_x, geometry.bottom() + 1 - inset_y - side, side, side))
         self.overlay.invalid = False
         self.overlay.show()
         self.overlay.raise_()
@@ -190,6 +207,7 @@ class WallAnchorController(QObject):
         source, result = d['source'](), d['result']
         self.drag = None
         self.overlay.hide()
+        self.overlay.pin_rects = []
         self.wall.apply_rects(windows, result.rects)
         self.wall.last_result = result
         self.set_anchor(source, True)

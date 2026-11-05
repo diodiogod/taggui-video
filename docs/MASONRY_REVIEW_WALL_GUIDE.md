@@ -2,296 +2,212 @@
 
 [Back to Documentation Hub](HUB.md)
 
-This guide covers the Masonry Wall layout and the review badge workflow.
+The Masonry Wall arranges selected images and videos in floating windows for
+side-by-side comparison. Resize items to emphasize them, pin the ones you want
+to keep in place, and use review badges to mark your choices.
 
-It is designed for fast comparison of multiple images or videos in separate floating windows, especially when you want to sort many similar generations and mark picks, rejects, questions, or custom badge meanings.
+## Quick Start
 
-## What It Is
+1. Select two or more items in the image list. Press **Ctrl+Shift+Enter** or
+   right-click and choose **Open … in Masonry Wall**. Dragging the multi-selection
+   onto empty screen space also opens a wall.
+2. **Resize a window** from an edge or corner. Ghost outlines preview the layout;
+   release the mouse to arrange the other windows. With the default settings,
+   your chosen size is remembered.
+3. **Ctrl-drag a window** to place it yourself. It snaps to screen edges and
+   other pinned windows. Release to pin it and arrange the others around it.
+4. **Release a lock** by clicking its small bottom-left icon, or right-click and
+   choose **Wall layout → This window → Flexible** to release all of its locks.
 
-- The Masonry Wall can open the current selection or rearrange the current floating windows as one wall.
-- It keeps the top aligned and packs the windows in a masonry-style arrangement across the current screen.
-- Mixed images and videos are supported.
-- If the wall contains multiple videos, video sync and playback start automatically.
-- The wall works together with the review badge system, so you can mark files while comparing them.
-- The shared masonry spacing can be adjusted in `Settings -> Advanced -> Floating masonry wall gap (px)`.
-- Horizontal alignment can be adjusted in `Settings -> Advanced -> Floating masonry alignment`.
-- Right-click a wall window and toggle `Masonry wall controls` live.
+To arrange windows you already opened individually, use **View → Arrange as
+Masonry Wall**, or **Arrange as Masonry Wall** in a regular floating window's
+right-click menu. Review overlays start off for this route; right-click a wall
+window and enable **Masonry wall controls** to show them. Opening a selection
+starts with these controls on, and multiple wall videos synchronize and play together.
 
-<p align="center">
-  <img src="../images/masonry-review-wall.jpg" alt="Masonry review wall with review badges" width="86%">
-</p>
+## Window States
 
-## Open The Masonry Wall
+Right-click a wall window and choose **Wall layout → This window**:
 
-- Select two or more items in the image list.
-- Right-click and choose `Open ... in Masonry Wall`.
-- Or press `Ctrl` + `Shift` + `Enter`.
-- Or drag a multi-selection from the image list and release it to open the wall directly.
+| State | During arrangement | Use it when… |
+| --- | --- | --- |
+| **Flexible** | May move and resize, as allowed by wall settings. | You want the wall to fit it automatically. |
+| **Keep size** | May move, but retains its dimensions. | You want an item to stay larger or smaller than the others. |
+| **Pin in place** | Retains its position and dimensions. | You want to build the layout around its placement. |
 
-Single-item spawn is still available. The masonry wall is for multi-item review.
+A manual resize applies **Keep size** when **Remember sizes I change** is on.
+Ctrl-drag applies **Pin in place**. You can still deliberately move or resize a
+pinned window; subsequent arrangements respect its new geometry.
 
-## Arrange Existing Floating Windows
+Locks last until released or the window closes. The bottom-left **pin** releases
+position; the **dotted anchor** releases a kept size. Hover to brighten the icon.
+A pinned window shows only the pin; unpinning reveals a separate size lock if one
+remains. Choosing **Flexible** clears both.
 
-- Right-click a floating viewer or comparison window and choose `Arrange as Masonry Wall`.
-- This repacks the current floating windows into the same Masonry Wall layout.
-- Rearranging starts with the wall controls off.
-- Turn them on later from the window right-click menu if needed.
+## Resize and Preview
 
-## Why Use It
+Drag an edge or corner to resize. The other windows stay still while ghost
+outlines show their proposed placements:
 
-- Compare many similar generations at once.
-- Review short video variants side by side.
-- Keep the main window available while using floating viewers for decisions.
-- Mark picks and rejects without leaving the comparison workflow.
+- **Amber:** the resized window's proposed destination. It may move on release
+  unless pinned.
+- **Blue:** the other proposed placements.
+- **Red preview:** the current constraints cannot be fitted by the planner.
+
+Release to apply the layout. Windows with kept sizes retain their dimensions;
+flexible windows can move and resize around them. Resizing a pinned window also
+rearranges the free windows around its new geometry.
+
+Hold **Shift** to preserve proportions while resizing. The setting **Settings →
+Advanced → Floating resize keeps aspect ratio by default** reverses this behavior:
+proportions are then preserved by default, and Shift allows free resizing.
+
+![Before, during, and after resizing: window A keeps its chosen size while the other windows rearrange.](../images/guides/wall-resize-reflow.png)
+
+*Illustrations are schematic. Amber borders and lock symbols highlight the chosen
+window; the actual lock controls are small corner icons.*
+
+## Pin and Position
+
+1. Hold **Ctrl**, press the left mouse button on a wall window, and drag.
+2. Enlarged red pin icons and matching borders mark the window being placed and
+   existing pins. Ghosts preview the remaining layout without moving the other windows.
+3. Release to apply the preview and pin the window. Repeat with another window
+   to arrange around multiple pins.
+
+During this gesture, **Shift** suppresses magnetic snapping and **Escape** cancels
+and restores the starting position. A red preview means the proposed placement
+does not fit; releasing restores the dragged window and shows a brief explanation.
+The red pin feedback returns to the small translucent icons when the gesture ends.
+Ctrl-drag stays on its starting screen and works even with automatic arrangement off.
+
+## Make Manual Adjustments
+
+| Control | Result |
+| --- | --- |
+| **Middle-drag** | Move a floating window without triggering wall arrangement. |
+| **Alt + resize** | Skip automatic arrangement for this gesture. The size is still remembered when that preference is on. |
+| **Alt + drag** | Move manually without triggering a comparison merge. |
+| **Ctrl+Alt+M** | Toggle automatic resize arrangement on or off. This choice is saved. |
+| **Wall layout → Arrange now** | Arrange explicitly, respecting locks, even when automatic arrangement is off. |
+
+Re-enabling automatic arrangement takes effect on the next resize; it does not
+immediately move the windows. The toggle shortcut can be changed in **Wall settings**.
+
+![Use Alt for one manual gesture, or Ctrl+Alt+M to toggle automatic resize arrangement.](../images/guides/wall-manual-controls.png)
 
 ## Packing and Automatic Reflow
 
-Right-click a wall window and open **Wall layout**:
+All layout actions are under **Wall layout** in a wall window's right-click menu.
+Wall-wide actions are also available under **View → Wall layout**.
 
-| Menu entry | What it does |
+| Entry | Purpose |
 | --- | --- |
-| Arrange now | Fit the current wall while respecting its locks. |
-| Arrange automatically after resizing | Apply a new layout on resize release. This is one saved on/off setting, also toggled with Ctrl+Alt+M. |
-| This window | Choose **Flexible**, **Keep size**, or **Pin in place**. Exactly one state is shown. |
-| Reset layout | Release kept sizes, unpin all windows, or start fresh by releasing all locks and arranging. |
-| Packing algorithm (this session) | Keep testing Best fit, Masonry, or MaxRects without changing your saved default. |
-| Wall settings… | Open grouped preferences with explanations. They also appear in Settings -> Advanced -> Floating Wall Layout. |
+| **Arrange now** | Fit the current wall, respecting locks. |
+| **Arrange automatically after resizing** | Apply the layout when you release a resize. |
+| **This window** | Choose Flexible, Keep size, or Pin in place for the clicked window. |
+| **Reset layout** | Release locks using the actions below. |
+| **Packing algorithm (this session)** | Test an algorithm without changing the saved default. |
+| **Wall settings…** | Open the grouped, saved preferences. |
 
-Under **This window**, Flexible releases all of that window's locks; Keep size
-allows movement but preserves its dimensions; Pin in place preserves both.
-Manual resizing automatically changes a flexible window to Keep size when
-**Remember sizes I change** is enabled. Ctrl-drag changes it to Pin in place.
-Window locks last until released or the window closes.
+### Reset the Layout
 
-**Reset layout -> Release kept sizes** retains pins. **Unpin all windows** retains
-separate size locks. Neither immediately moves windows. **Start fresh — release all
-locks and arrange** removes both constraints and fits again, even if automatic
-arrangement is off. It leaves the automatic-arrangement preference unchanged.
+| Action | Releases | Rearranges immediately? |
+| --- | --- | --- |
+| **Release kept sizes** | Size locks; pins remain. | No |
+| **Unpin all windows** | Position pins; separate size locks remain. | No |
+| **Start fresh — release all locks and arrange** | All size locks and pins. | Yes |
 
-**Wall settings** groups the less frequent preferences:
+**Start fresh** also works with automatic arrangement off and leaves that setting
+unchanged. Use **Arrange now** after either of the other reset actions when ready.
 
-- **Automatic arrangement:** when to arrange, whether other windows may resize,
-  whether chosen sizes are remembered, and the toggle shortcut.
-- **Dragging and previews:** Ctrl-drag, magnetic snapping, and resize ghosts.
-- **Appearance:** discreet clickable lock icons.
-- **Advanced** (collapsed): preserve visual order and the saved default algorithm.
+### Wall Settings
 
-The defaults enable automatic arrangement, resizing unlocked windows, remembering
-chosen sizes, snapping, ghosts, and lock icons. Best fit is the default algorithm.
+Open **Wall layout → Wall settings…**. The same preferences appear under
+**Settings → Advanced → Floating Wall Layout**. Changes apply immediately and are
+saved for future sessions.
 
-The illustrations below use simplified media windows. They show the behavior of
-the controls; their positions are examples rather than exact packing results.
+| Group | Controls |
+| --- | --- |
+| **Automatic arrangement** | Arrange after resizing; allow other windows to resize; remember sizes you change; toggle shortcut. |
+| **Dragging and previews** | Ctrl-drag pinning; magnetic snapping; resize ghosts. |
+| **Appearance** | Show or hide the clickable lock icons without changing locks. |
+| **Advanced** | Keep the current visual order; choose the default packing algorithm. |
 
-The algorithm can also be set to `Masonry` or `MaxRects`. The right-click menu's
-`Packing algorithm (this session)` overrides the saved default without changing
-it. Choose `Use settings` to return to the saved algorithm. Changing the session
-algorithm repacks the current wall when automatic arrangement is enabled.
+The default is automatic arrangement with resizing, size preservation, snapping,
+ghosts, and icons enabled. Turn off **Allow other windows to resize** for
+position-only arrangement. Explicit **Keep size** choices remain active even if
+**Remember sizes I change** is off.
 
-MaxRects packs rectangles without rotating the media. Best fit uses heuristics;
-it does not guarantee a mathematically optimal arrangement. Older installations
-without `rectpack` fall back to masonry; the normal requirements installation
-includes the dependency.
+![Allowing other windows to resize versus changing positions only; window A retains its kept size in both cases.](../images/guides/wall-sizing-options.png)
 
-Opening a new wall always chooses initial sizes from the media proportions.
-Subsequent repacks use the current window shapes. The existing
-`Floating resize keeps aspect ratio by default` setting and Shift override still
-control manual resizing. Media itself retains its existing fit/zoom behavior.
+Spacing and alignment are under **Settings → Advanced → Floating masonry wall gap
+(px)** and **Floating masonry alignment**. Keeping the current visual order can
+leave less room for packing; disable it to allow more rearrangement.
 
-For example, resize the first of ten windows and release the mouse: its chosen
-size is kept while the others are arranged around it. Resize a second and third
-window and their sizes are kept too. The windows may move during a repack.
-Use **This window -> Keep size** to keep its dimensions, or **Flexible** to release
-all its locks. **Reset layout -> Release kept sizes** releases size locks across the
-wall. Use **Arrange now** to apply another layout.
-Explicitly kept sizes remain respected even when automatic preservation of
-manual resizes is disabled. Size choices last for the lifetime of each window.
+### Compare Algorithms
 
-![Three stages: begin with a wall, resize landscape window A, then release the mouse. A keeps its enlarged size while the other windows may move or resize, retaining their proportions.](../images/guides/wall-resize-reflow.png)
+Use **Packing algorithm (this session)** to try **Best fit**, **Masonry**, or
+**MaxRects**. **Use settings** restores the saved default. Changing the session
+algorithm arranges the wall when automatic arrangement is on; otherwise use
+**Arrange now**.
 
-*The amber outline marks the window you resize. The lock marks its kept size.*
-
-With automatic sizing off, packing only changes positions. It cannot increase
-the windows' combined area. If the sizes do not fit, the current geometry is left
-in place and a temporary tooltip explains how to enable sizing or release kept
-sizes. The message does not add a status-bar row or reduce the viewer area.
-
-![Automatic sizing comparison: when on, unkept windows may move and resize; when off, all current window sizes stay fixed and only positions change. Kept window A is the same size in both examples.](../images/guides/wall-sizing-options.png)
-
-*Automatic sizing applies to windows without kept sizes. Both modes preserve
-window proportions; fixed sizes cannot always be made to fit.*
-
-**Keep the current visual order** in Wall settings -> Advanced uses the existing saved rearrange-order
-preference. It keeps the current top-to-bottom, left-to-right order, which can
-leave less room for packing. Disable it to allow more rearrangement.
-
-## Manual Control
-
-![Manual controls: hold Alt to bypass one gesture or turn off automatic resize arrangement with Ctrl+Alt+M.](../images/guides/wall-manual-controls.png)
-
-- Hold **Alt** during a resize to skip automatic reflow for that gesture. Releasing
-  Alt before the mouse still skips that gesture's reflow. Its new size is remembered.
-- Alt-drag also suppresses the floating-window compare-merge gesture.
-- Toggle **Arrange automatically after resizing** with **Ctrl+Alt+M**, or from the
-  Wall layout menu, to make several manual adjustments. This choice is saved.
-- Resuming automatic layout takes effect on the next resize; it does not immediately
-  rearrange the wall. **Arrange now** explicitly arranges even when automatic arrangement is off.
-- Automatic reflow preserves playback, synchronization, wall controls, and the
-  viewer's fit/custom-zoom state. A new gesture, setting change, close, or automatic-arrangement
-  toggle cancels an older pending layout result.
-
-Layout calculations for resize reflow run in a worker using only geometry. They
-do not reload media or restart the wall. Initial opening and the explicit
-`Arrange as Masonry Wall` command retain their synchronous layout calculation.
+**Best fit** compares candidate layouts, **Masonry** arranges windows in columns,
+and **MaxRects** fits rectangles without rotating them. Best fit is the default;
+none guarantees a mathematically optimal layout. Walls with pins use obstacle-aware
+packing, which takes precedence over the algorithm and visual-order preference.
 
 ## Review Badges
 
-Review badges are item-level marks stored separately from normal tags.
+With **Masonry wall controls** on, hover a window to reveal its 3×3 badge slots.
+Click a slot to toggle a mark for that file. Active marks remain visible after
+the pointer leaves. Badges are review labels, stored separately from normal tags.
 
-They are meant for review workflow state, not caption content. A badge can mean whatever you want it to mean in your workflow.
+| Default shortcuts | Mark |
+| --- | --- |
+| **1–5** | Numeric rank; one rank at a time. |
+| **8** or **Shift+8** | Star (*) |
+| **?** | Question |
+| **X** | Reject |
+| **Apostrophe/quote** | Warning (!) |
 
-Current default badge set:
+Symbolic badges can be combined. Customize their labels, colors, appearance,
+and shortcuts in **Settings → Badges**. Badges also appear on thumbnails and
+persist across reloads. Filters include `review:true`, `review:reject`,
+`review:idea`, and `review_rank:>=2`.
 
-- `1 2 3 4 5`
-- `*`
-- `!`
-- `?`
-- `X`
+The detachable **Review toolbar** provides the same actions. **Clear → Clear
+Selected** clears the current review target; **Clear → Clear Current Folder**
+asks for confirmation before clearing the folder's badges.
 
-All symbolic badges are stackable. Numeric badges act like a single rank slot.
+## Common Questions
 
-## Add Badges In The Wall
+**Why didn't the wall rearrange after resizing?**
 
-- Hover a masonry wall viewer to reveal the 3x3 badge slots.
-- Click a slot to add or remove that badge from that file.
-- After hover leaves, active badges stay visible on that viewer.
-- Hover a badge slot to see the generic tooltip.
+Check **Arrange automatically after resizing** and whether Alt was used during
+the gesture. If fitting failed, try smaller kept sizes, unpinning an item, or
+enabling **Allow other windows to resize**. Empty space alone does not guarantee
+that the remaining shapes fit within their size and spacing constraints.
 
-This makes the wall usable as a direct review surface instead of only a comparison layout.
+**What happens when a layout cannot fit?**
 
-## Review Toolbar
+After resizing, your manual change remains and the other windows keep their
+positions. An invalid Ctrl-drag restores the dragged window's starting position.
+A brief tooltip explains the problem.
 
-The detachable `Review toolbar` gives you the same badge actions outside the wall overlay.
+**Can a pin extend off-screen?**
 
-- Click badge buttons to add or remove review marks.
-- Use `Clear -> Clear Selected` to clear badges from the current review target.
-- Use `Clear -> Clear Current Folder` to clear all review badges in the loaded folder.
+Yes. A deliberate resize can extend a pin beyond the screen. The wall preserves
+it and uses the remaining visible space for unpinned windows.
 
-`Clear Current Folder` shows a confirmation dialog before it runs.
+**Why can't I draw a hint in a floating window?**
 
-## Position anchors and magnetic dragging
-
-Hold **Ctrl** before pressing the left mouse button on a wall window, then drag.
-The window moves while translucent rectangles preview where the other windows
-will fit. The real sibling windows stay still until you release the mouse.
-Dark red borders identify the dragged window and existing anchors during the gesture.
-Release to apply the preview and anchor this window. The borders disappear and a
-tiny translucent pin outline remains. A dotted anchor outline indicates a kept size. Repeat with another window to compose around multiple anchors.
-
-- Screen edges and other anchors attract the dragged window within 10 logical pixels.
-  Snapping respects the wall gap and releases beyond 18 pixels to avoid jitter.
-- Hold **Shift** during Ctrl-drag for precise placement without snapping.
-- Press **Escape** to cancel and restore the starting position.
-- A red ghost preview means no layout fits. Releasing restores the dragged window
-  to its starting position, retains existing anchors, and shows a temporary tooltip.
-- Right-click a window, open **Wall layout**, and choose **This window -> Flexible**
-  to release all its locks, or **Keep size** to allow movement only.
-  **Reset layout -> Unpin all windows** releases all visible wall pins.
-- **Ctrl-drag to pin a window** and **Snap to screen edges and other pins** are
-  under **Wall settings -> Dragging and previews**.
-
-Anchors keep both position and size during repacking, including resize-driven reflow.
-They are separate from kept sizes: resetting kept sizes does not unpin windows.
-You can still deliberately resize or move an anchor; its new geometry becomes its
-constraint. Ordinary dragging and Alt-drag retain manual behavior. Explicit Ctrl-drag
-works even when automatic arrangement is off. Anchors last for the lifetime of the window.
-
-During Ctrl-drag, anchored packing preserves orientation and favors nearby placements
-at the current sizes, shrinking unkept windows only when necessary and automatic sizing
-is enabled. After a normal resize or explicit repack, unkept windows can grow again
-to fill available space. Anchors retain their geometry, including any deliberate resize.
-It uses an obstacle-aware rectangle planner regardless of the initial wall algorithm;
-anchors take precedence over screen-order and alignment preferences. The dragged
-window stays on its starting screen during the gesture.
-
-## Badge Settings
-
-`Settings -> Badges` lets you customize the current badge system without changing the number of slots.
-
-You can change:
-
-- badge symbol/label
-- optional hover title
-- badge color
-- shortcut mapping
-- text color
-- font size
-- corner roundness
-
-These settings apply live across:
-
-- the review toolbar
-- the masonry wall overlay
-- image-list badges
-
-## Keyboard Shortcuts
-
-Default review shortcuts:
-
-- `1` to `5` for numeric rank badges
-- `8` or `Shift` + `8` for `*`
-- `?` for question
-- `X` for reject
-- apostrophe/quote key for warning
-
-The exact mappings may differ if you customized them in `Settings -> Badges`.
-
-## Image List Behavior
-
-- Review badges also appear on thumbnails in the image list.
-- They persist across reloads because they are saved in the folder DB and JSON sidecars.
-- Filtering can use review predicates such as `review:true`, `review:reject`, `review:idea`, and `review_rank:>=2`.
+Hint creation belongs to the main viewer. Existing hints remain visible in
+floating viewers; Ctrl-drag there is available for wall positioning.
 
 ## Related Docs
 
-- [Floating Viewers User Guide](FLOATING_VIEWERS_USER_GUIDE.md)
-- [Compare Guide](COMPARE_GUIDE.md)
-- [Filtering Guide](FILTERING_GUIDE.md)
-- [Shortcuts](SHORTCUTS.md)
-
-The illustrations have editable SVG sources beside their PNG exports in
-`images/guides/`. Rebuild them with
-`venv/Scripts/python.exe scripts/render_wall_guide_illustrations.py`.
-
-
-## Size locks, anchors, and resize previews
-
-- **This window -> Keep size** fixes dimensions but lets packing move the window.
-  With **Remember sizes I change** enabled, a manual resize creates this constraint automatically.
-- **This window -> Pin in place** fixes both dimensions and placement during packing.
-  Ctrl-drag creates this constraint; you can still deliberately resize the anchor.
-- Turn off **Arrange automatically after resizing** to suspend resize reflow; Alt bypasses it for one gesture.
-
-Resize ghosts show the proposed release layout without moving the other windows.
-The amber outline is the resized window's proposed destination, which can differ
-from its current position if it is not anchored. Blue outlines show the other windows.
-A red preview indicates that no layout fits. Disable **Show ghosts while resizing**
-in Wall settings -> Dragging and previews if desired. Reflow settings and size constraints still apply.
-
-The narrow outer resize border takes priority over video-control buttons; controls
-remain clickable inside that border. This includes the floating player panel and
-hover playback buttons.
-
-Constraint icons sit in the bottom-left corner, inset beyond the resize border,
-without a solid background. Hover to brighten an icon; click it to release only
-that constraint on that window. The pin
-means anchored position; the dotted anchor means kept size. A pinned window shows only the pin. Clicking it reveals a size lock if a separate
-kept size remains. Turn off **Wall settings -> Appearance -> Show lock icons** to hide
-them without changing the constraints.
-
-An anchor may extend off-screen after a deliberate resize. Reflow preserves that
-geometry and packs unanchored windows into the remaining visible space, respecting
-kept sizes and minimum window sizes. The unanchored windows must remain on-screen.
-
-Hint creation is disabled in floating viewers, including comparison viewers.
-Ctrl-drag remains available for wall positioning without entering hint insertion.
-Create hints in the main viewer; existing hints still display in floating viewers.
+- [Floating Viewers User Guide](FLOATING_VIEWERS_USER_GUIDE.md): spawning, moving, zooming, and hold mode.
+- [Compare Guide](COMPARE_GUIDE.md): comparison and merging.
+- [Filtering Guide](FILTERING_GUIDE.md): filtering by review marks.
+- [Shortcuts](SHORTCUTS.md): other keyboard controls.

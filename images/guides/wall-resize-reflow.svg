@@ -131,11 +131,11 @@
 <path d="M1307.0,503.0 L1324.0,513.0 L1307.0,523.0 Z" fill="#ffffff" fill-opacity=".8"/>
 <text x="1052" y="696" font-family="Arial" font-size="22" font-weight="700" fill="#12233b" text-anchor="start">A&#x27;s chosen size is kept.</text>
 <text x="1052" y="728" font-family="Arial" font-size="22" font-weight="400" fill="#12233b" text-anchor="start">Other windows may move or resize.</text>
-<rect x="44" y="786" width="262" height="44" rx="22" fill="#ddefe9"/>
-<text x="175.0" y="815" font-family="Arial" font-size="18" font-weight="700" fill="#12233b" text-anchor="middle">Reflow after resizing: ON</text>
-<rect x="327" y="786" width="354" height="44" rx="22" fill="#fff0d4"/>
-<text x="504.0" y="815" font-family="Arial" font-size="18" font-weight="700" fill="#12233b" text-anchor="middle">Preserve manually resized sizes: ON</text>
-<rect x="702" y="786" width="330" height="44" rx="22" fill="#e4edf8"/>
-<text x="867.0" y="815" font-family="Arial" font-size="18" font-weight="700" fill="#12233b" text-anchor="middle">Automatically size other windows: ON</text>
+<rect x="44" y="786" width="480" height="44" rx="22" fill="#ddefe9"/>
+<text x="284.0" y="815" font-family="Arial" font-size="18" font-weight="700" fill="#12233b" text-anchor="middle">Arrange automatically after resizing: ON</text>
+<rect x="540" y="786" width="360" height="44" rx="22" fill="#fff0d4"/>
+<text x="720.0" y="815" font-family="Arial" font-size="18" font-weight="700" fill="#12233b" text-anchor="middle">Remember sizes I change: ON</text>
+<rect x="916" y="786" width="576" height="44" rx="22" fill="#e4edf8"/>
+<text x="1204.0" y="815" font-family="Arial" font-size="18" font-weight="700" fill="#12233b" text-anchor="middle">Allow other windows to resize: ON</text>
 <text x="1490" y="856" font-family="Arial" font-size="16" font-weight="400" fill="#52657d" text-anchor="end">A / B: landscape    C: square    D: portrait</text>
 </svg>

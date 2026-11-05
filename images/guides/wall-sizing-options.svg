@@ -2,7 +2,7 @@
 <rect width="1536" height="1110" fill="#f6f8fc"/>
 <text x="44" y="70" font-family="Arial" font-size="40" font-weight="700" fill="#12233b" text-anchor="start">Choose what reflow can change.</text>
 <text x="44" y="108" font-family="Arial" font-size="21" font-weight="400" fill="#52657d" text-anchor="start">Kept window A stays the same size in both modes. All window proportions are preserved.</text>
-<text x="44" y="173" font-family="Arial" font-size="30" font-weight="700" fill="#12233b" text-anchor="start">Automatic sizing: ON</text>
+<text x="44" y="173" font-family="Arial" font-size="30" font-weight="700" fill="#12233b" text-anchor="start">Allow other windows to resize: ON</text>
 <text x="44" y="210" font-family="Arial" font-size="21" font-weight="400" fill="#52657d" text-anchor="start">Unkept windows may move AND resize.</text>
 <text x="44" y="252" font-family="Arial" font-size="22" font-weight="700" fill="#12233b" text-anchor="start">Before repack</text>
 <rect x="44" y="266" width="688" height="300" rx="18" fill="#152b42"/>
@@ -85,7 +85,7 @@
 <text x="565" y="718" font-family="Arial" font-size="24" font-weight="700" fill="#ffffff" text-anchor="start">D</text>
 <path d="M577.0,740.0 L594.0,750.0 L577.0,760.0 Z" fill="#ffffff" fill-opacity=".8"/>
 <text x="44" y="984" font-family="Arial" font-size="22" font-weight="700" fill="#12233b" text-anchor="start">A keeps its chosen size.</text>
-<text x="804" y="173" font-family="Arial" font-size="30" font-weight="700" fill="#12233b" text-anchor="start">Automatic sizing: OFF</text>
+<text x="804" y="173" font-family="Arial" font-size="30" font-weight="700" fill="#12233b" text-anchor="start">Allow other windows to resize: OFF</text>
 <text x="804" y="210" font-family="Arial" font-size="21" font-weight="400" fill="#52657d" text-anchor="start">Windows move. Every current size stays fixed.</text>
 <text x="804" y="252" font-family="Arial" font-size="22" font-weight="700" fill="#12233b" text-anchor="start">Before repack</text>
 <rect x="804" y="266" width="688" height="300" rx="18" fill="#152b42"/>
@@ -169,5 +169,5 @@
 <path d="M1297.0,760.0 L1314.0,770.0 L1297.0,780.0 Z" fill="#ffffff" fill-opacity=".8"/>
 <text x="804" y="984" font-family="Arial" font-size="22" font-weight="700" fill="#12233b" text-anchor="start">A keeps its chosen size.</text>
 <rect x="44" y="1020" width="1448" height="58" rx="12" fill="#fff0d4"/>
-<text x="68" y="1057" font-family="Arial" font-size="21" font-weight="400" fill="#12233b" text-anchor="start">If fixed sizes do not fit: keep the current layout and show a brief tooltip. No permanent UI row.</text>
+<text x="68" y="1057" font-family="Arial" font-size="21" font-weight="400" fill="#12233b" text-anchor="start">If kept sizes do not fit: release a size lock, unpin a window, or choose smaller sizes.</text>
 </svg>

@@ -133,3 +133,11 @@ Start fresh releases all locks and explicitly fits even with automatic arrangeme
 Submenu and menuAction Python wrappers are retained for the lifetime of the parent
 menu; dropping temporary QAction wrappers can invalidate their QMenu on this PySide
 build. Menu tests exercise chained action lookup and repeated state refresh.
+
+
+## Documentation illustrations
+
+The user guide uses schematic diagrams with editable SVG sources and PNG exports
+in `images/guides/`. Rebuild them with
+`venv/Scripts/python.exe scripts/render_wall_guide_illustrations.py`.
+Keep diagram labels aligned with the current menu and settings names.

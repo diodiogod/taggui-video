@@ -40,16 +40,21 @@ Spawn actions are blocked while the main viewer is in fullscreen mode.
 - Resize from all corners and all borders (drag edge/corner zones).
 - By default, hold `Shift` while resizing to keep the floating viewer's current aspect ratio.
 - You can invert this in `Settings -> Advanced -> Floating resize keeps aspect ratio by default`, which makes aspect-preserving resize the default and uses `Shift` for temporary free resize.
-- `Arrange as Masonry Wall` and `Open in Masonry Wall` both use the shared spacing from `Settings -> Advanced -> Floating masonry wall gap (px)`, including the screen-edge inset.
-- Both masonry flows use `Settings -> Advanced -> Floating masonry alignment`.
-- `Arrange as Masonry Wall` uses the default rearrange order from `Settings -> Advanced -> Rearrange preserves screen order`.
-- Wall packing, automatic sizing, and resize reflow are configurable in `Settings -> Advanced -> Floating Wall Layout` and the wall right-click menu.
-- Hold `Alt` to skip resize reflow for one gesture. `Ctrl+Alt+M` toggles the saved automatic resize arrangement setting; the shortcut is configurable in Wall settings.
-- Manually resized sizes are kept by default. The wall menu can release one kept size or reset all kept sizes. See [Packing and Automatic Reflow](MASONRY_REVIEW_WALL_GUIDE.md#packing-and-automatic-reflow).
-- Right-click a Masonry Wall window and toggle `Masonry wall controls` live.
-- `Open in Masonry Wall` starts with the wall controls on.
-- `Arrange as Masonry Wall` starts with the wall controls off.
 - Close button (`x`) appears on hover near the top-right corner.
+
+## Masonry Walls
+
+Select multiple thumbnails and press **Ctrl+Shift+Enter** to open a wall. To arrange
+existing floating windows, use **View → Arrange as Masonry Wall**.
+
+- Resize a window to preview and apply a new layout on release.
+- **Ctrl-drag** to place and pin a window; **Alt** bypasses automatic resize arrangement for one gesture.
+- Under **Wall layout → This window**, choose **Flexible**, **Keep size**, or **Pin in place**.
+- Click the small bottom-left lock icon to release its constraint.
+- **Ctrl+Alt+M** toggles the saved automatic resize arrangement setting.
+
+See the [Masonry Review Wall Guide](MASONRY_REVIEW_WALL_GUIDE.md) for layout settings,
+ghost previews, resets, and review badges.
 
 ## Hold Mode
 

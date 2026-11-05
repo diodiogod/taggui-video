@@ -385,6 +385,8 @@ class FloatingWallController(QObject):
         enabled = self.setting('floating_wall_constraint_icons')
         pinned = bool(getattr(window, '_wall_position_anchored', False))
         kept = not pinned and self._fixed_size(window) is not None
+        drag = self.anchors.drag
+        preview_pin = drag is not None and (pinned or drag['source']() is window)
         offset = 14
         for attr, active, size_lock in (
                 ('_wall_anchor_indicator', pinned, False),
@@ -399,7 +401,7 @@ class FloatingWallController(QObject):
                 setattr(window, attr, indicator)
             if indicator is not None:
                 indicator.move(offset, max(14, window.height() - indicator.height() - 14))
-                indicator.setVisible(active and enabled)
+                indicator.setVisible(active and enabled and not preview_pin)
                 if active and enabled:
                     indicator.raise_()
             if active:
