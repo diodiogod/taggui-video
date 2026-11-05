@@ -699,6 +699,11 @@ class ImageListViewGeometryMixin:
         if not self.use_masonry:
             return False
         host = self.window()
+        width_ratio = getattr(host, "_image_list_width_ratio", None)
+        if (width_ratio is not None and width_ratio.preserve_ratio
+                and getattr(host, "image_list", None) is width_ratio.dock
+                and width_ratio.dock.isAncestorOf(self)):
+            return False
         try:
             preserve_until = float(getattr(host, "_preserve_restored_dock_layout_until", 0.0) or 0.0)
         except Exception:

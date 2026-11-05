@@ -25,6 +25,7 @@ from controllers.menu_manager import MenuManager
 from controllers.quick_sort_controller import QuickSortController
 from controllers.quick_tag_controller import QuickTagController
 from controllers.signal_manager import SignalManager
+from controllers.dock_width_ratio import DockWidthRatioController
 from models.image_list_model import ImageListModel
 from models.image_tag_list_model import ImageTagListModel
 from models.proxy_image_list_model import ProxyImageListModel
@@ -825,6 +826,7 @@ class MainWindow(QMainWindow):
 
         # Detect dock widget resize (splitter movement)
         self.image_list.list_view.installEventFilter(self)
+        self._image_list_width_ratio = DockWidthRatioController(self, self.image_list)
         self.image_tags_editor = ImageTagsEditor(
             self.proxy_image_list_model, self.tag_counter_model,
             self.image_tag_list_model, self.image_list, tokenizer,
