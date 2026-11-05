@@ -5,6 +5,24 @@ All notable changes to TagGUI Video 1M are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.7.0] - 2026-11-05
+
+### Added
+
+- Masonry Wall anchors, previews, and clearer layout controls
+- Ctrl-drag wall windows to pin their positions, with magnetic snapping and lightweight previews of the remaining layout.
+- Preview rearrangement while resizing, preserve chosen sizes, and reflow around pinned windows, including those extending beyond the screen.
+- See enlarged red pins during anchored dragging; click discreet corner icons to release position or size locks.
+- Use a simpler Wall layout menu, grouped settings, and separate reset actions. Packing algorithm choices remain available for comparison.
+- Resize floating viewers without video controls blocking their borders, and avoid accidental hint creation while Ctrl-dragging.
+- Follow reorganized wall instructions with updated illustrations.
+- View and copy generation prompts on demand from supported image and video metadata and ComfyUI workflows, without changing media or captions.
+- Keep the image-list pane's relative width when resizing the main window.
+- Speed up repeat Windows launches by reusing CUDA detection, with an option to recheck it.
+
+### Fixed
+
+- Avoid unnecessary video surface rebuilds during display changes and improve new-media refresh diagnostics when crash logging is enabled.
 ## [1.6.23] - 2026-10-21
 
 ### Added
