@@ -25,8 +25,8 @@ This page collects the most useful keyboard shortcuts and quick actions currentl
 - Duplicate selected images: `Ctrl` + `D`
 - Open selected image in Windows Explorer: `Ctrl` + `E`
 - Open image context menu: right-click an image
-- Spawn a floating viewer from the clicked image: double-click
-- Open the clicked image in its system default app: `Ctrl` + double-click
+- Double-click a thumbnail to perform the action selected in Advanced settings (floating viewer by default)
+- Use `Ctrl` + double-click for the alternate floating-viewer or system-app action
 - Open selected image in Windows Explorer: `Alt` + double-click
 - Drag a real file to another app instead of spawning a floating viewer: hold `Alt` while dragging from the image list
 - Drag a sibling workflow `.json` to another app when present, otherwise drag the media file: hold `Ctrl` + `Alt` while dragging from the image list
@@ -38,7 +38,7 @@ Typing letters in the image list no longer jumps selection. Use the filter box w
 
 ### Generation prompts
 
-Right-click an image or video and choose **Copy Positive Prompt** or **View Generation Prompt...**. The main and floating viewers also have prompt actions in their menus. Select text in the prompt window to copy just that part; multiple or unverified results require a manual choice.
+Right-click an image or video and choose **Copy Positive Prompt** or **View Generation Prompt...**. The main and floating viewers also have prompt actions in their menus. Use the prompt window's arrows to browse the current list and update its viewer. Select text to copy just that part; multiple or unverified results require a manual choice. In Advanced settings, **Image double-click action** can also open the prompt viewer.
 
 TagGUI reads saved positive metadata, including A1111 parameters, first; it then checks ComfyUI workflows embedded in the file or a matching `.json` sidecar. Simple Prompt is supported, though workflow inputs may differ from text changed at runtime, such as random choices. Video metadata reading requires `ffprobe` on `PATH` and recognizes VideoHelperSuite wrappers and [ComfyUI Video Saver](https://github.com/diodiogod/ComfyUI-Video-Saver) metadata. Reading happens only when requested and does not write to files, captions, or the database. A future opt-in batch import to captions or the database could be added separately.
 

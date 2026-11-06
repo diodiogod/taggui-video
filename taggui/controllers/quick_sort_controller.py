@@ -279,7 +279,7 @@ class QuickSortHud(QObject):
             QEvent.Type.Resize,
             QEvent.Type.Show,
         }:
-            QTimer.singleShot(0, self.reposition)
+            QTimer.singleShot(0, self, self.reposition)
         return False
 
     def reposition(self):

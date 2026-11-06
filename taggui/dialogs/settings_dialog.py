@@ -2184,12 +2184,14 @@ class SettingsDialog(QDialog):
         image_list_double_click_combo = SettingsComboBox(
             key='image_list_double_click_action',
             default='spawn viewer')
-        image_list_double_click_combo.addItems(['spawn viewer', 'system default app'])
+        image_list_double_click_combo.addItems([
+            'spawn viewer', 'system default app', 'generation prompt viewer'])
         image_list_double_click_combo.setToolTip(
             'Controls what double-clicking a thumbnail does.\n\n'
             'spawn viewer: open the clicked media in a spawned floating viewer.\n'
-            'system default app: open the clicked media with the OS default application.\n\n'
-            'Ctrl+double-click always performs the alternate action.\n'
+            'system default app: open the clicked media with the OS default application.\n'
+            'generation prompt viewer: view the clicked media\'s positive prompt.\n\n'
+            'Ctrl+double-click opens the system app for spawn viewer, or a floating viewer otherwise.\n'
             'Alt+double-click still opens Windows Explorer.\n'
             'Applied live (no restart).'
         )

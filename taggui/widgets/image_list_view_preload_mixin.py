@@ -348,6 +348,7 @@ class ImageListViewPreloadMixin:
         """Called when user releases scrollbar."""
         import time
         self._scrollbar_dragging = False
+        self._nonwheel_scroll_idle_timer.start(200)
         source_model = self.model().sourceModel() if hasattr(self.model(), 'sourceModel') else self.model()
         strict_release_target_global = None
 
@@ -693,7 +694,7 @@ class ImageListViewPreloadMixin:
         # runs on the UI thread; thumbnail conversion below needs its own budget.
         if needs_rebuild and not getattr(self, '_queue_building', False):
             self._queue_building = True
-            QTimer.singleShot(0, self._build_queues_async)
+            QTimer.singleShot(0, self, self._build_queues_async)
             # Continue with old queues (if any) while new ones build
             # This prevents UI freeze - better to show placeholders than freeze
 

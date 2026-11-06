@@ -62,6 +62,18 @@ def _release_video_players_for_paths(main_window, target_paths) -> bool:
 
 
 class ImageListViewFileOpsMixin:
+    def open_generation_prompt_at_index(self, index, *, copy_on_load=False):
+        """Open the clicked media, independently of any current selection."""
+        if not index.isValid() or index.model() is not self.model():
+            return False
+        image = index.data(Qt.ItemDataRole.UserRole)
+        if image is None:
+            return False
+        from widgets.generation_prompt_dialog import open_generation_prompt
+        open_generation_prompt(self._main_window_host(), image, copy_on_load=copy_on_load,
+                               list_view=self, index=index)
+        return True
+
     def open_selected_generation_prompt(self, *, copy_on_load=False):
         """Capture the selected image before starting asynchronous metadata I/O."""
         if self.get_selected_image_count() != 1:
@@ -69,8 +81,11 @@ class ImageListViewFileOpsMixin:
         images = self.get_selected_images()
         if len(images) != 1 or images[0] is None:
             return
+        indices = self.get_selected_proxy_indices()
+        index = next((item for item in indices if item.data(Qt.ItemDataRole.UserRole) is images[0]), None)
         from widgets.generation_prompt_dialog import open_generation_prompt
-        open_generation_prompt(self._main_window_host(), images[0], copy_on_load=copy_on_load)
+        open_generation_prompt(self._main_window_host(), images[0], copy_on_load=copy_on_load,
+                               list_view=self, index=index)
 
     def get_selected_proxy_indices(self) -> list[QModelIndex]:
         """Return unique selected proxy indices in visual row order."""

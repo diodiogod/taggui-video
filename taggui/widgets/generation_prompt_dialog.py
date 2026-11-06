@@ -6,11 +6,12 @@ from PySide6.QtCore import Qt, QTimer, Slot
 from PySide6.QtGui import QCursor
 from PySide6.QtWidgets import (
     QApplication, QComboBox, QDialog, QHBoxLayout, QLabel, QMessageBox,
-    QPlainTextEdit, QPushButton, QToolTip, QVBoxLayout,
+    QPlainTextEdit, QPushButton, QToolButton, QToolTip, QVBoxLayout,
 )
 
 from utils.generation_prompt import read_generation_prompts
 from utils.latest_task import LatestTask
+from widgets.generation_prompt_navigation import PromptNavigator
 
 
 _copy_request = 0
@@ -22,12 +23,13 @@ def _new_copy_request():
     return _copy_request
 
 
-def open_generation_prompt(parent, media, *, copy_on_load=False):
+def open_generation_prompt(parent, media, *, copy_on_load=False, list_view=None, viewer=None, index=None):
     """Open a prompt for the explicit media owner captured at invocation."""
     if media is None or not getattr(media, 'path', None):
         QMessageBox.information(parent, 'Generation Prompt', 'Select an image or video first.')
         return None
-    dialog = GenerationPromptDialog(Path(media.path), parent, copy_on_load=copy_on_load)
+    dialog = GenerationPromptDialog(Path(media.path), parent, copy_on_load=copy_on_load,
+                                    list_view=list_view, viewer=viewer, index=index)
     dialog.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose, True)
     if copy_on_load:
         QToolTip.showText(QCursor.pos(), 'Reading generation prompt…', parent)
@@ -37,7 +39,7 @@ def open_generation_prompt(parent, media, *, copy_on_load=False):
 
 
 class GenerationPromptDialog(QDialog):
-    def __init__(self, path, parent=None, *, copy_on_load=False):
+    def __init__(self, path, parent=None, *, copy_on_load=False, list_view=None, viewer=None, index=None):
         super().__init__(parent)
         self.path = Path(path)
         self._copy_on_load = bool(copy_on_load)
@@ -47,10 +49,10 @@ class GenerationPromptDialog(QDialog):
         self.resize(700, 420)
 
         layout = QVBoxLayout(self)
-        filename = QLabel(self.path.name, self)
-        filename.setToolTip(str(self.path))
-        filename.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
-        layout.addWidget(filename)
+        self.filename = QLabel(self.path.name, self)
+        self.filename.setToolTip(str(self.path))
+        self.filename.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        layout.addWidget(self.filename)
         self.source = QComboBox(self)
         self.source.currentIndexChanged.connect(self._select_candidate)
         self.source.setVisible(False)
@@ -65,6 +67,18 @@ class GenerationPromptDialog(QDialog):
                                           | Qt.TextInteractionFlag.TextSelectableByKeyboard)
         layout.addWidget(self.text, 1)
         buttons = QHBoxLayout()
+        self.previous_button = QToolButton(self)
+        self.previous_button.setArrowType(Qt.ArrowType.LeftArrow)
+        self.previous_button.setToolTip('Previous image or video')
+        self.previous_button.setAccessibleName('Previous image or video')
+        self.previous_button.clicked.connect(lambda: self._navigate(-1))
+        buttons.addWidget(self.previous_button)
+        self.next_button = QToolButton(self)
+        self.next_button.setArrowType(Qt.ArrowType.RightArrow)
+        self.next_button.setToolTip('Next image or video')
+        self.next_button.setAccessibleName('Next image or video')
+        self.next_button.clicked.connect(lambda: self._navigate(1))
+        buttons.addWidget(self.next_button)
         buttons.addStretch(1)
         self.copy_button = QPushButton('Copy Prompt', self)
         self.copy_button.setEnabled(False)
@@ -82,6 +96,43 @@ class GenerationPromptDialog(QDialog):
 
         self._worker = LatestTask(self, name='generation-prompt')
         self._worker.completed.connect(self._loaded)
+        self._navigator = None
+        if list_view is not None or viewer is not None:
+            self._navigator = PromptNavigator(self.path, list_view=list_view, viewer=viewer,
+                                              index=index, parent=self)
+            self._navigator.changed.connect(self._update_navigation)
+            self._navigator.navigated.connect(self._show_media_prompt)
+            self._navigator.failed.connect(self.info.setText)
+        self._update_navigation()
+        self._worker.submit(read_generation_prompts, self.path)
+
+    def _update_navigation(self):
+        previous, next_ = self._navigator.availability() if self._navigator is not None else (False, False)
+        self.previous_button.setEnabled(previous)
+        self.next_button.setEnabled(next_)
+
+    def _navigate(self, direction):
+        if self._navigator is None:
+            return
+        # A dialog opened after an ambiguous copy request must not copy a new
+        # file automatically when the user browses to it.
+        self._copy_on_load = False
+        self._navigator.move(direction)
+
+    def _show_media_prompt(self, path):
+        self.path = Path(path)
+        self.filename.setText(self.path.name)
+        self.filename.setToolTip(str(self.path))
+        self._candidates = []
+        self.source.blockSignals(True)
+        self.source.clear()
+        self.source.blockSignals(False)
+        self.source.setVisible(False)
+        self.text.clear()
+        self.info.setText('Reading media metadata…')
+        self.copy_button.setEnabled(False)
+        self._copy_feedback_timer.stop()
+        self._update_copy_button_label()
         self._worker.submit(read_generation_prompts, self.path)
 
     @Slot(int, object, object)
@@ -146,5 +197,7 @@ class GenerationPromptDialog(QDialog):
         self._copy_feedback_timer.start(1800)
 
     def closeEvent(self, event):
+        if self._navigator is not None:
+            self._navigator.close()
         self._worker.close()
         super().closeEvent(event)

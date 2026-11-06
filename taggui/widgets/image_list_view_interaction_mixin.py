@@ -165,6 +165,8 @@ class ImageListViewInteractionMixin:
             action = ''
         if action == 'system default app':
             return 'system_default_app'
+        if action == 'generation prompt viewer':
+            return 'generation_prompt_viewer'
         return 'spawn_viewer'
 
     def _spawn_viewer_for_double_click(self, index: QModelIndex, event) -> bool:
@@ -395,7 +397,7 @@ class ImageListViewInteractionMixin:
             except Exception:
                 pass
             if attempts <= 300:
-                QTimer.singleShot(100, lambda token=active_token: self._run_one_shot_targeted_jump_finalize(token))
+                QTimer.singleShot(100, self, lambda token=active_token: self._run_one_shot_targeted_jump_finalize(token))
             else:
                 self._cancel_one_shot_targeted_jump()
             return
@@ -735,7 +737,7 @@ class ImageListViewInteractionMixin:
         self._masonry_recalc_timer.start(0)
         dispatch_ms = (_t.monotonic() - self._one_shot_jump_started_monotonic) * 1000
         print(f"[NAV] Page {target_page + 1} requested ({reason}): dispatch={dispatch_ms:.0f}ms")
-        QTimer.singleShot(80, lambda token=token: self._run_one_shot_targeted_jump_finalize(token))
+        QTimer.singleShot(80, self, lambda token=token: self._run_one_shot_targeted_jump_finalize(token))
         return True
 
     def _start_exact_jump_settle(self, target_global: int):
@@ -1905,7 +1907,9 @@ class ImageListViewInteractionMixin:
                     )
 
                 handled = False
-                if action == 'spawn_viewer':
+                if action == 'generation_prompt_viewer':
+                    handled = self.open_generation_prompt_at_index(index)
+                elif action == 'spawn_viewer':
                     handled = self._spawn_viewer_for_double_click(index, event)
                     if not handled:
                         handled = self._open_double_click_in_system_app(image)
@@ -3185,6 +3189,74 @@ class ImageListViewInteractionMixin:
             reason=str(jump_kind),
             source_model=source_model,
         )
+
+    def select_resident_neighbor(self, index: QModelIndex, target_global: int):
+        """Select an already laid-out item without rebuilding the page window.
+
+        Return None while the view is busy, False if a full relocation is
+        needed, and True when the resident item was selected.
+        """
+        model = self.model()
+        source = model.sourceModel() if model and hasattr(model, 'sourceModel') else model
+        if source is None or not index.isValid() or index.model() is not model:
+            return False
+        if (getattr(self, '_model_resetting', False)
+                or getattr(self, '_masonry_calculating', False)
+                or getattr(self, '_painting', False)
+                or (hasattr(self, '_resize_timer') and self._resize_timer.isActive())):
+            return None
+        source_index = model.mapToSource(index) if hasattr(model, 'mapToSource') else index
+        if (not source_index.isValid()
+                or source.get_global_index_for_row(source_index.row()) != target_global):
+            return False
+        if self.use_masonry and not self._get_masonry_item_rect(target_global).isValid():
+            return False
+
+        # This is an explicit selection, so old jump/restore anchors must not
+        # pull it back when an already-running page or enrichment update lands.
+        self._clear_pending_targeted_relocation()
+        self._clear_explicit_jump_tracking()
+        self._selected_global_lock_until = 0.0
+        self._selected_global_lock_value = None
+        self._strict_jump_target_global = None
+        self._strict_jump_until = 0.0
+        self._suppress_masonry_auto_scroll_until = 0.0
+        self._restore_target_page = None
+        self._restore_target_global_index = None
+        self._restore_anchor_until = 0.0
+        self._resize_anchor_page = None
+        self._resize_anchor_target_global = None
+        self._resize_anchor_until = 0.0
+        self._idle_anchor_target_global = None
+        self._idle_anchor_until = 0.0
+        self._release_page_lock_page = None
+        self._release_page_lock_until = 0.0
+        self._drag_release_anchor_active = False
+        self._drag_release_anchor_idx = None
+        self._drag_release_anchor_until = 0.0
+        self._stick_to_edge = None
+        self._pending_edge_snap = None
+        self._pending_edge_snap_until = 0.0
+        self._user_click_selection_frozen_until = 0.0
+        self._selected_global_index = int(target_global)
+        self._mark_selection_log_source('prompt_navigation', hold_s=2.5)
+
+        # The caller performs one explicit viewer/editor commit after checking
+        # the resulting selection still belongs to the expected media.
+        self._committing_jump_selection = True
+        try:
+            self.set_current_index_preserving_virtual_selection(index)
+        finally:
+            self._committing_jump_selection = False
+        current = self.currentIndex()
+        if not current.isValid() or self._proxy_index_to_global_index(current) != target_global:
+            return False
+        self._selected_global_index = int(target_global)
+        self._current_global_row_cache = int(target_global)
+        self._current_proxy_row_cache = int(current.row())
+        self.scrollTo(current, QAbstractItemView.ScrollHint.EnsureVisible)
+        self._extend_exact_target_hold(int(target_global), seconds=20.0)
+        return True
 
 
     def _on_scrollbar_action_triggered(self, action):

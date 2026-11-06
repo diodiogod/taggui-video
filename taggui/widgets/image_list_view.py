@@ -226,6 +226,9 @@ class ImageListView(
         self._mouse_scroll_timer.setSingleShot(True)
         self._mouse_scroll_timer.timeout.connect(self._on_mouse_scroll_stopped)
         self._mouse_scrolling = False
+        self._nonwheel_scroll_idle_timer = QTimer(self)
+        self._nonwheel_scroll_idle_timer.setSingleShot(True)
+        self._nonwheel_scroll_idle_timer.timeout.connect(self._finish_nonwheel_scrolling)
         self._page_indicator_timer.setSingleShot(True)
         self._page_indicator_timer.timeout.connect(self._fade_out_page_indicator)
         self._preload_index = 0  # Track preload progress

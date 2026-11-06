@@ -1576,7 +1576,8 @@ class FloatingViewerWindow(WallGeometryInteraction, QWidget):
             return
         if selected is prompt_action:
             from widgets.generation_prompt_dialog import open_generation_prompt
-            open_generation_prompt(self, prompt_media)
+            open_generation_prompt(self, prompt_media, viewer=self.viewer,
+                                   index=getattr(self.viewer, 'proxy_image_index', None))
         elif exit_compare_action is not None and selected is exit_compare_action:
             self.compare_exit_requested.emit(self.viewer)
         elif selected in fit_mode_map:

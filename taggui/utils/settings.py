@@ -71,7 +71,7 @@ DEFAULT_SETTINGS = {
     'floating_double_click_detail_zoom_percent': 400,  # 400% => 4x fallback zoom on floating double-click detail jump
     'floating_resize_preserve_aspect_by_default': False,
     'floating_viewer_hold_opacity': 46,  # Hold mode opacity in percent (0 = fully transparent, 100 = fully opaque)
-    'image_list_double_click_action': 'spawn viewer',  # spawn viewer, system default app
+    'image_list_double_click_action': 'spawn viewer',  # spawn viewer, system default app, generation prompt viewer
     'compare_fit_mode': 'preserve',  # preserve, fill, stretch (image compare overlay mode)
     'video_compare_fit_mode': 'preserve',  # preserve, fill, stretch (video compare window mode)
     'video_compare_audio_mode': 'ambient_mix',  # dominant, ambient_mix

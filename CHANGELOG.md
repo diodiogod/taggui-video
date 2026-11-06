@@ -5,6 +5,17 @@ All notable changes to TagGUI Video 1M are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.7.1] - 2026-11-06
+
+### Added
+
+- Open a generation prompt by double-clicking a thumbnail using the Advanced setting.
+- Browse prompts for adjacent images and videos while updating the associated viewer.
+- Reduce thumbnail-list flicker and keep prompt controls responsive over floating viewers.
+
+### Changed
+
+- Improve generation prompt browsing
 ## [1.7.0] - 2026-11-05
 
 ### Added

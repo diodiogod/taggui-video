@@ -60,6 +60,10 @@ class FloatingResizeInput(QObject):
             window = window.parentWidget()
         if window is None or window._wall_controller() is not self.wall:
             return False
+        # A dialog may have the viewer as its QObject parent while being an
+        # independent top-level window. Its controls must keep their clicks.
+        if watched.window() is not window:
+            return False
         if watched is getattr(window, '_close_button', None):
             return False
         zone = window._resize_zone_from_local_pos(window.mapFromGlobal(event.globalPosition().toPoint()))

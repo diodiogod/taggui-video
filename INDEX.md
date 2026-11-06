@@ -91,6 +91,7 @@ TagGUI is a desktop app for image/video tagging, captioning, and dataset prepara
 - `image_tags_editor.py`: Tag editing panel plus quick Ideogram caption list/JSON editing, caption creation, and full-editor handoff.
 - `ideogram_caption_editor.py`: Responsive structured-caption inspector with scene/element editing, palettes, autosave state, raw JSON, and persistent Ctrl+wheel UI zoom.
 - `generation_prompt_dialog.py`: On-demand, non-persistent generation prompt viewer and copy controls.
+- `generation_prompt_navigation.py`: Viewer-owned navigation for the generation prompt dialog.
 - `all_tags_editor.py`: Bulk/all-tags editor.
 - `auto_captioner.py`: Auto-caption UI integration.
 - `auto_markings.py`: Responsive auto-marking panel with persistent Ctrl+wheel UI zoom, model picker, class-to-label/action mapping, advanced inference controls, and run status/log UI.

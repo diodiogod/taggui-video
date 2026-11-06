@@ -40,6 +40,8 @@ def opened_prompt_videos(tmp_path, monkeypatch):
     settings.setValue('secondary_browser_restore_on_startup', False)
     settings.setValue('secondary_browser_visible', False)
     settings.setValue('pagination_threshold', 0)
+    settings.setValue('image_list_sort_by', 'Default')
+    settings.setValue('image_list_sort_dir', 'ASC')
     host = MainWindow(APP)
     source = host.image_list_model
     executor = host.image_list.list_view._masonry_executor
@@ -192,6 +194,81 @@ def _visible_red(viewer):
         return True
     except AssertionError:
         return False
+
+
+@requires_ffmpeg
+@pytest.mark.parametrize('initial_play', [False, True])
+def test_prompt_arrows_open_the_next_video_in_its_viewer(opened_prompt_videos, initial_play):
+    host, paths = opened_prompt_videos
+    viewer, view = host.image_viewer, host.image_list.list_view
+    player = viewer.video_player
+    if initial_play:
+        if not NATIVE:
+            player.seek_to_frame(200)
+            player.set_playback_speed(-1)
+            start_frame = player.get_current_frame_number()
+        host.toggle_viewer_play_pause(viewer)
+        pump(lambda: player.is_playing)
+        if NATIVE:
+            pump(lambda: player.mpv_player is not None and player._mpv_surface_active
+                 and _visible_red(viewer), seconds=15)
+        else:
+            pump(lambda: player.get_current_frame_number() < start_frame, seconds=10)
+    choose_context_action(host, view.viewport(), 'View Generation Prompt...')
+    pump(lambda: any(dialog.isVisible() for dialog in host.findChildren(GenerationPromptDialog)))
+    dialog = next(dialog for dialog in host.findChildren(GenerationPromptDialog) if dialog.isVisible())
+    pump(lambda: dialog.copy_button.isEnabled() and dialog.next_button.isEnabled())
+    assert dialog.path == paths[0]
+    QTest.mouseClick(dialog.next_button, Qt.MouseButton.LeftButton)
+    pump(lambda: dialog.path == paths[1] and dialog.text.toPlainText() == 'prompt B'
+         and viewer.current_media is not None and viewer.current_media.path == paths[1]
+         and player.video_path == paths[1], seconds=20)
+    QTest.qWait(500)
+    assert viewer.current_media.path == paths[1]
+    assert view.currentIndex().data(Qt.UserRole).path == paths[1]
+    if NATIVE:
+        pump(lambda: _visible_red(viewer), seconds=5)
+
+
+@requires_ffmpeg
+def test_floating_prompt_navigation_does_not_switch_the_main_video(opened_prompt_videos):
+    host, paths = opened_prompt_videos
+    main, proxy = host.image_viewer, host.proxy_image_list_model
+    main_player = main.video_player
+    index = next(proxy.index(row, 0) for row in range(proxy.rowCount())
+                 if proxy.index(row, 0).data(Qt.UserRole).path == paths[1])
+    floating = host.spawn_floating_viewer_at(index)
+    pump(lambda: floating.viewer.current_media is not None
+         and floating.viewer.current_media.path == paths[1], seconds=15)
+    player = floating.viewer.video_player
+    pump(lambda: not player._runtime_pending, seconds=15)
+    if not NATIVE:
+        player.seek_to_frame(200)
+        player.set_playback_speed(-1)
+        before_frame = player.get_current_frame_number()
+    host.toggle_viewer_play_pause(floating.viewer)
+    pump(lambda: player.is_playing)
+    if NATIVE:
+        pump(lambda: player.mpv_player is not None and player._mpv_surface_active
+             and _visible_red(floating.viewer), seconds=15)
+    else:
+        pump(lambda: player.get_current_frame_number() < before_frame, seconds=10)
+    target = player.mpv_widget if NATIVE and player._mpv_surface_active else floating.viewer.view.viewport()
+    choose_context_action(host, target, 'View / Copy Generation Prompt...',
+                          before_click=lambda: host.set_active_viewer(main))
+    pump(lambda: any(dialog.isVisible() for dialog in floating.findChildren(GenerationPromptDialog)))
+    dialog = next(dialog for dialog in floating.findChildren(GenerationPromptDialog) if dialog.isVisible())
+    pump(lambda: dialog.previous_button.isEnabled())
+    QTest.mouseClick(dialog.previous_button, Qt.MouseButton.LeftButton)
+    pump(lambda: dialog.path == paths[0] and dialog.text.toPlainText() == 'prompt A'
+         and floating.viewer.current_media is not None
+         and floating.viewer.current_media.path == paths[0]
+         and player.video_path == paths[0], seconds=20)
+    assert main.video_player is main_player and main.current_media.path == paths[0]
+    assert main_player.video_path == paths[0] and not main_player.is_playing
+    if NATIVE:
+        dialog.close()
+        pump(lambda: _visible_red(floating.viewer), seconds=5)
 
 
 @requires_ffmpeg

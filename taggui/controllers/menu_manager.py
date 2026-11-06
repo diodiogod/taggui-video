@@ -786,7 +786,10 @@ class MenuManager(QObject):
     def _show_main_generation_prompt(self):
         from widgets.generation_prompt_dialog import open_generation_prompt
         viewer = getattr(self.main_window, 'image_viewer', None)
-        open_generation_prompt(self.main_window, getattr(viewer, 'current_media', None))
+        proxy = getattr(viewer, 'proxy_image_list_model', None)
+        list_view = self.main_window._resolve_list_view_for_proxy_model(proxy)
+        open_generation_prompt(self.main_window, getattr(viewer, 'current_media', None),
+                               list_view=list_view, index=getattr(viewer, 'proxy_image_index', None))
 
     def _create_edit_menu(self, menu_bar):
         """Create Edit menu."""

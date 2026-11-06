@@ -1,6 +1,16 @@
 from widgets.image_list_shared import *  # noqa: F401,F403
 
 class ImageListViewScrollMixin:
+    def _finish_nonwheel_scrolling(self):
+        """Release scroll throttling after programmatic or scrollbar movement."""
+        if self._mouse_scrolling or self._scrollbar_dragging:
+            return
+        model = self.model()
+        source = model.sourceModel() if model and hasattr(model, 'sourceModel') else None
+        stop_scrolling = getattr(source, 'set_scrolling_state', None)
+        if callable(stop_scrolling) and getattr(source, '_is_scrolling', False):
+            stop_scrolling(False)
+
     def _on_mouse_scroll_stopped(self):
         """Called when mouse scrolling stops (200ms after last wheel event)."""
         self._mouse_scrolling = False
@@ -103,6 +113,9 @@ class ImageListViewScrollMixin:
         # Notify model that scrolling started (defer cache writes)
         if source_model and hasattr(source_model, 'set_scrolling_state'):
             source_model.set_scrolling_state(True)
+            idle_timer = getattr(self, '_nonwheel_scroll_idle_timer', None)
+            if not getattr(self, '_mouse_scrolling', False) and idle_timer is not None:
+                idle_timer.start(200)
 
         # Cancel cache flush and warming timers when scrolling starts
         self._cache_flush_timer.stop()

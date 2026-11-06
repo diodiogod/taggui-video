@@ -166,7 +166,7 @@ class QuickTagHud(QuickSortHud):
         # recalculate once more after Qt has processed those deletions so the
         # pending-tag frame cannot collapse until another key is pressed.
         if reposition:
-            QTimer.singleShot(0, self.reposition)
+            QTimer.singleShot(0, self, self.reposition)
 
     def set_existing(self, tags: list[str], *, reposition: bool = True):
         normalized = [str(tag).strip() for tag in tags if str(tag).strip()]
