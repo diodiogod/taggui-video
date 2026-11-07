@@ -5,6 +5,17 @@ All notable changes to TagGUI Video 1M are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.7.3] - 2026-11-07
+
+### Added
+
+- Return focus to the image list after choosing a sort with the mouse
+- Keep Home and End working while sorting and in large virtual lists
+- Preserve keyboard controls and independent browser navigation
+
+### Changed
+
+- Improve image-list navigation after sorting
 ## [1.7.2] - 2026-11-06
 
 ### Added

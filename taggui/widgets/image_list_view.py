@@ -104,8 +104,8 @@ class ImageListView(
         source_model.modelReset.connect(self.clear_virtual_all_selection)
 
         # Recalculate masonry layout when model changes (including filter changes)
-        proxy_image_list_model.modelReset.connect(lambda: self._recalculate_masonry_if_needed("modelReset"))
-        proxy_image_list_model.layoutChanged.connect(lambda: self._on_layout_changed())
+        proxy_image_list_model.modelReset.connect(self._on_proxy_layout_reset)
+        proxy_image_list_model.layoutChanged.connect(self._on_layout_changed)
         proxy_image_list_model.filter_changed.connect(self._on_filter_changed)
         proxy_image_list_model.filter_changed.connect(
             self.clear_virtual_all_selection
@@ -489,6 +489,10 @@ class ImageListView(
         source_model.modelReset.connect(self._clear_selection_cache)
         self.update_context_menu_actions()
         self._selection_history_current = self._capture_selection_snapshot()
+
+    @Slot()
+    def _on_proxy_layout_reset(self):
+        self._recalculate_masonry_if_needed("modelReset")
 
     def _reaction_feedback_anchor_rect(self, target_global: int | None = None) -> QRect:
         viewport_rect = self.viewport().rect()

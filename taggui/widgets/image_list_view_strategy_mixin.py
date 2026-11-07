@@ -1815,7 +1815,7 @@ class ImageListViewStrategyMixin:
         if hasattr(self, '_painting') and self._painting:
             # Defer this layout change until after paint completes
             from PySide6.QtCore import QTimer
-            QTimer.singleShot(50, lambda: self._on_layout_changed())
+            QTimer.singleShot(50, self, self._on_layout_changed)
             return
 
         # DON'T clear masonry items here - keep old positions for painting

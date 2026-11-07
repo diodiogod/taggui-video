@@ -2156,6 +2156,35 @@ class ImageListViewInteractionMixin:
 
     def keyPressEvent(self, event):
         """Handle keyboard events in the image list."""
+        if (event.key() in (Qt.Key.Key_Home, Qt.Key.Key_End)
+                and event.modifiers() == Qt.KeyboardModifier.NoModifier):
+            dock = getattr(self, '_image_list_dock', None)
+            cancel_sort_restore = getattr(dock, 'cancel_pending_sort_restore', None)
+            if callable(cancel_sort_restore):
+                cancel_sort_restore()
+            model = self.model()
+            source = model.sourceModel() if model and hasattr(model, 'sourceModel') else model
+            pending = getattr(source, '_view_prepare_owner', None)
+            if source is not None and getattr(source, '_paginated_mode', False):
+                total = int(getattr(source, '_total_count', 0) or 0)
+                endpoint = total - 1 if event.key() == Qt.Key.Key_End else 0
+                sort_pending = pending is not None and pending.get('reason') in (
+                    'sort', 'keyboard_endpoint')
+                cold_virtual_endpoint = (
+                    pending is None and total > 0 and self._virtual_list_is_active(source)
+                    and source.get_loaded_row_for_global_index(endpoint) < 0
+                )
+                if total > 0 and (sort_pending or cold_virtual_endpoint):
+                    # Prepare cold endpoints off-thread and let the latest key
+                    # replace any pending sort or earlier endpoint request.
+                    source.prepare_ordered_view(
+                        reason='keyboard_endpoint',
+                        target_global=0,
+                        target_end=event.key() == Qt.Key.Key_End,
+                        restore_selection=False,
+                    )
+                    event.accept()
+                    return
         if self.use_masonry and self._has_pending_explicit_jump_hold() and event.key() in (
             Qt.Key.Key_Up, Qt.Key.Key_Down, Qt.Key.Key_Left, Qt.Key.Key_Right,
             Qt.Key.Key_PageUp, Qt.Key.Key_PageDown, Qt.Key.Key_Home, Qt.Key.Key_End,
@@ -2168,6 +2197,28 @@ class ImageListViewInteractionMixin:
             Qt.Key.Key_Up, Qt.Key.Key_Down, Qt.Key.Key_Left, Qt.Key.Key_Right,
             Qt.Key.Key_PageUp, Qt.Key.Key_PageDown, Qt.Key.Key_Home, Qt.Key.Key_End,
         ):
+            if not self.use_masonry and self._virtual_list_is_active():
+                # An explicit key supersedes the virtual list's previous sort
+                # restore, including its viewer-suppression guard.
+                self._last_explicit_jump_kind = None
+                self._last_explicit_jump_target_global = None
+                self._last_explicit_jump_until = 0.0
+                self._selected_global_lock_until = 0.0
+                self._selected_global_lock_value = None
+                self._restore_target_page = None
+                self._restore_target_global_index = None
+                self._restore_anchor_until = 0.0
+                host = self._main_window_host()
+                if getattr(getattr(host, 'image_list', None), 'list_view', None) is self:
+                    host._restore_in_progress = False
+                    host._restore_target_global_rank = -1
+                if (event.key() in (Qt.Key.Key_Home, Qt.Key.Key_End)
+                        and event.modifiers() == Qt.KeyboardModifier.NoModifier):
+                    model = self.model()
+                    source = model.sourceModel() if hasattr(model, 'sourceModel') else model
+                    total = int(getattr(source, '_total_count', 0) or 0)
+                    if total > 0:
+                        self._selected_global_index = total - 1 if event.key() == Qt.Key.Key_End else 0
             self._release_jump_for_user_scroll()
         is_virtual_selection_shortcut = (
             event.key() in (Qt.Key.Key_A, Qt.Key.Key_I)
@@ -2323,6 +2374,10 @@ class ImageListViewInteractionMixin:
 
         # Default behavior for other keys
         super().keyPressEvent(event)
+        if event.key() in (Qt.Key.Key_Home, Qt.Key.Key_End):
+            # Reaching an endpoint is still handled here; do not let the main
+            # window forward the same key to a different browser.
+            event.accept()
 
     def keyReleaseEvent(self, event):
         """Delay masonry snap until Ctrl is released after Ctrl+wheel zoom."""

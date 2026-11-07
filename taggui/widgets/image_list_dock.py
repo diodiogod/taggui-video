@@ -441,11 +441,43 @@ class MediaTypeTabBar(QTabBar):
 
 class SortComboBox(SettingsComboBox):
     random_seed_menu_requested = Signal(QPoint)
+    mouse_item_activated = Signal()
 
     def __init__(self, key: str, default: str | None = None):
         super().__init__(key=key, default=default)
         self._sort_direction = 'ASC'
         self._display_text_override = ''
+        self._mouse_release_row = -1
+        self.view().installEventFilter(self)
+        self.view().viewport().installEventFilter(self)
+        self.activated.connect(self._on_item_activated)
+
+    def showPopup(self):
+        self._mouse_release_row = -1
+        super().showPopup()
+
+    def keyPressEvent(self, event):
+        self._mouse_release_row = -1
+        super().keyPressEvent(event)
+
+    def eventFilter(self, watched, event):
+        popup = self.view()
+        if watched is popup or watched is popup.viewport():
+            if event.type() == QEvent.Type.KeyPress:
+                self._mouse_release_row = -1
+            elif (watched is popup.viewport()
+                  and event.type() == QEvent.Type.MouseButtonRelease):
+                self._mouse_release_row = (
+                    popup.indexAt(event.position().toPoint()).row()
+                    if event.button() == Qt.MouseButton.LeftButton else -1
+                )
+        return super().eventFilter(watched, event)
+
+    def _on_item_activated(self, index: int):
+        mouse_activated = index == self._mouse_release_row
+        self._mouse_release_row = -1
+        if mouse_activated:
+            self.mouse_item_activated.emit()
 
     def set_sort_direction(self, sort_dir: str):
         normalized_dir = 'DESC' if str(sort_dir).upper() == 'DESC' else 'ASC'
@@ -785,6 +817,7 @@ class ImageList(QDockWidget):
         settings.setValue('image_list_sort_dir', self._sort_dir)
         self.sort_combo_box.currentTextChanged.connect(self._on_sort_combo_text_changed)
         self.sort_combo_box.activated.connect(self._on_sort_combo_activated)
+        self.sort_combo_box.mouse_item_activated.connect(self._queue_focus_after_mouse_sort)
         self._update_sort_combo_display()
         QTimer.singleShot(0, self, self._update_sort_label_visibility)
 
@@ -1420,6 +1453,21 @@ class ImageList(QDockWidget):
         if emit_signal and (sort_changed or dir_changed):
             self.sort_state_changed.emit(normalized_sort, normalized_dir)
 
+    @Slot()
+    def _queue_focus_after_mouse_sort(self):
+        # Let Qt close the popup before transferring focus, without stealing it
+        # from another control the user has already chosen.
+        QTimer.singleShot(0, self, self._focus_list_after_mouse_sort)
+
+    def _focus_list_after_mouse_sort(self):
+        if self.sort_combo_box.hasFocus() and self.list_view.isVisible():
+            self.list_view.setFocus(Qt.FocusReason.MouseFocusReason)
+
+    def cancel_pending_sort_restore(self):
+        """Let explicit navigation supersede a queued sort selection restore."""
+        self._image_to_scroll_to = None
+        self._sort_restore_target_global = None
+
     @Slot(str)
     def _on_sort_combo_text_changed(self, sort_by: str):
         previous_sort = self._active_sort_by
@@ -1690,7 +1738,7 @@ class ImageList(QDockWidget):
                 # restores the selected path, even while masonry is busy.
                 self._rebind_refresh_selection_anchor(result['target'])
             return
-        if reason not in ('sort', 'delete'):
+        if reason not in ('sort', 'delete', 'keyboard_endpoint'):
             return
         if (result['total'] <= 0 or (reason == 'sort' and (
                 not result['request']['restore_selection']
@@ -1700,7 +1748,10 @@ class ImageList(QDockWidget):
             self.list_view.verticalScrollBar().setValue(0)
             return
         source = self.proxy_image_list_model.sourceModel()
-        self._sort_restore_reason = 'delete_restore' if reason == 'delete' else 'sort_restore'
+        self._sort_restore_reason = {
+            'delete': 'delete_restore',
+            'keyboard_endpoint': 'index_input',
+        }.get(reason, 'sort_restore')
         self._sort_restore_target_global = result['target']
         self._arm_sort_restore_anchor(source, result['target'])
         try:

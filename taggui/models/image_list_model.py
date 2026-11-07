@@ -3790,7 +3790,8 @@ class ImageListModel(QAbstractListModel):
 
     def prepare_ordered_view(self, *, reason='refresh', selected_path=None, previous_query=None,
                              stale_paths=(), previous_text=None, previous_order=None,
-                             restore_selection=True, refresh_scope=False, target_global=None):
+                             restore_selection=True, refresh_scope=False, target_global=None,
+                             target_end=False):
         """Prepare count/rank/target records off-thread and accept one owned view."""
         if not self._paginated_mode or not self._db or self._shutdown_requested:
             return
@@ -3824,6 +3825,7 @@ class ImageListModel(QAbstractListModel):
                         resident_pages=tuple(sorted(self._pages)) if reason in ('metadata','refresh','delete') else (),
                         target_hint=(max(0, int(target_global)) if target_global is not None
                                      else fallback_page*self.PAGE_SIZE if reason != 'filter' else 0),
+                        target_end=bool(target_end),
                         scope_options=scope_options,
                         validation_generation=self._path_validation_generation,
                         media_sql=self._media_type_sql, text_sql=self._text_filter_sql,
@@ -3860,7 +3862,8 @@ class ImageListModel(QAbstractListModel):
                 query = dict(sort_field=request['sort_field'], sort_dir=request['sort_dir'],
                              filter_sql=filter_sql, bindings=bindings, random_seed=request['random_seed'])
                 total = db.count_or_raise(filter_sql, bindings)
-                target = min(request.get('target_hint',0), max(0,total-1))
+                target = (max(0, total - 1) if request.get('target_end')
+                          else min(request.get('target_hint', 0), max(0, total - 1)))
                 if request['selected_path'] is not None:
                     try:
                         relative = str(request['selected_path'].relative_to(request['directory']))
