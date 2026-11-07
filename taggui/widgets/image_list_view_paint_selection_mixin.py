@@ -780,7 +780,7 @@ class ImageListViewPaintSelectionMixin:
         if self._selection_history_flush_scheduled:
             return
         self._selection_history_flush_scheduled = True
-        QTimer.singleShot(0, self._flush_selection_history_pending)
+        QTimer.singleShot(0, self, self._flush_selection_history_pending)
 
 
     def _flush_selection_history_pending(self):

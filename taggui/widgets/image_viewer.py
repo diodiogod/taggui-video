@@ -4100,9 +4100,6 @@ class ImageViewer(QWidget):
     def _load_image_impl(self, proxy_image_index: QModelIndex, is_complete = True, *, decoded_image=None):
         if self._viewer_model_resetting:
             return
-        overlay = getattr(self, "_reaction_feedback_overlay", None)
-        if overlay is not None:
-            overlay.hide_immediately()
         proxy_index = self._normalize_proxy_index(proxy_image_index)
         if is_complete and decoded_image is None and self.get_zoom_follow_mode() != ZOOM_FOLLOW_MODE_DEFAULT:
             self._capture_zoom_follow_state_from_current_view()
@@ -4125,6 +4122,22 @@ class ImageViewer(QWidget):
         if image is None:
             # Page not loaded yet in pagination mode - wait
             return
+        # Metadata refreshes and completed async decodes can reload the same
+        # image while reaction feedback is animating. Only clear it when the
+        # displayed media owner actually changes.
+        source = self.proxy_image_list_model.sourceModel()
+        owner = self._loaded_media_model_owner
+        same_media = (
+            owner is not None
+            and owner[0] is self.proxy_image_list_model
+            and owner[1] is source
+            and owner[2] == source._directory_path
+            and owner[3] == image.path
+        )
+        if not same_media:
+            overlay = getattr(self, "_reaction_feedback_overlay", None)
+            if overlay is not None:
+                overlay.hide_immediately()
         if self._can_reuse_loaded_video(image):
             # A generated clip refresh replaces the browser's Image objects
             # and restores the same selection. Keep its native surface,
@@ -4141,7 +4154,6 @@ class ImageViewer(QWidget):
         self.proxy_image_index = QPersistentModelIndex(proxy_index)
         self.current_media = image
         self._last_displayed_media = image
-        source = self.proxy_image_list_model.sourceModel()
         self._loaded_media_model_owner = (
             self.proxy_image_list_model, source, source._directory_path, image.path)
         if is_complete and not self.is_spawned_viewer:

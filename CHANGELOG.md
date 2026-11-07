@@ -5,6 +5,16 @@ All notable changes to TagGUI Video 1M are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.7.2] - 2026-11-06
+
+### Added
+
+- Restore reaction animations
+- Keep Love and Bomb animations visible when the current image refreshes.
+
+### Changed
+
+- Improve stability when closing an image list after changing its selection.
 ## [1.7.1] - 2026-11-06
 
 ### Added
