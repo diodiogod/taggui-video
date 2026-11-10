@@ -5,6 +5,16 @@ All notable changes to TagGUI Video 1M are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.7.4] - 2026-11-10
+
+### Added
+
+- Keep the resize cursor steady along floating-window edges and corners
+- Preserve image panning and other interactions near window borders
+
+### Fixed
+
+- Fix floating-viewer resize cursor flicker
 ## [1.7.3] - 2026-11-07
 
 ### Added

@@ -92,6 +92,37 @@ def resize_gesture(window, delta=QPoint(-35, -25), modifiers=Qt.KeyboardModifier
     assert not window._resize_active
 
 
+def test_resize_cursor_stays_visible_on_viewport_mouse_moves(opened_wall, monkeypatch):
+    from PySide6.QtCore import QEvent, QPointF
+    from PySide6.QtGui import QMouseEvent
+    from PySide6.QtWidgets import QApplication
+
+    _, windows = opened_wall
+    window = windows[0]
+    window.resize(240, 240)
+    target = window.viewer.view.viewport()
+
+    def move(point, buttons=Qt.NoButton, modifiers=Qt.NoModifier):
+        event = QMouseEvent(QEvent.MouseMove, QPointF(point), QPointF(target.mapToGlobal(point)),
+                            Qt.NoButton, buttons, modifiers)
+        QApplication.sendEvent(target, event)
+
+    for y in range(70, 90, 2):
+        move(QPoint(target.width() - 5, y))
+        assert target.cursor().shape() == Qt.SizeHorCursor
+
+    move(QPoint(target.width() - 5, 5))
+    assert target.cursor().shape() == Qt.SizeBDiagCursor
+    move(QPoint(target.width() // 2, target.height() // 2))
+    assert target.cursor().shape() not in (Qt.SizeHorCursor, Qt.SizeBDiagCursor)
+
+    # A drag that started inside the image must still reach the view at the edge.
+    received = []
+    monkeypatch.setattr(window.viewer.view, 'mouseMoveEvent', lambda event: received.append(event.buttons()))
+    move(QPoint(target.width() - 5, 70), buttons=Qt.LeftButton)
+    assert received == [Qt.LeftButton]
+
+
 def finish_reflow(controller):
     pump(lambda: controller._pending is None and controller.worker._active is None, seconds=10)
 

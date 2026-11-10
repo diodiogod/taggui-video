@@ -2099,14 +2099,22 @@ class FloatingViewerWindow(WallGeometryInteraction, QWidget):
                             self._force_activate_viewer_owner()
                     except Exception:
                         pass
+                if event.buttons() != Qt.MouseButton.NoButton or event.modifiers() & Qt.KeyboardModifier.ControlModifier:
+                    self._update_overlay_hover_from_global_pos(event_global)
+                    return False
                 try:
                     local_pos = self.mapFromGlobal(event_global)
                     zone_name = self._resize_zone_from_local_pos(local_pos)
                     resize_cursor = self._cursor_for_resize_zone(zone_name)
                     if resize_cursor is not None:
-                        if hasattr(watched, "setCursor"):
+                        if hasattr(watched, "setCursor") and watched.cursor().shape() != resize_cursor:
                             watched.setCursor(resize_cursor)
                         self._update_overlay_hover_from_global_pos(event_global)
+                        view = getattr(self.viewer, "view", None)
+                        if view is not None and watched in (view, view.viewport()):
+                            # The graphics view otherwise clears this cursor while
+                            # processing the same hover move for scene interaction.
+                            return True
                         return False
                     if hasattr(watched, "unsetCursor"):
                         watched.unsetCursor()

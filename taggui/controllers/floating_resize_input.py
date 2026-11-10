@@ -16,10 +16,20 @@ class FloatingResizeInput(QObject):
     def restore_cursor(self):
         if self.hover:
             ref, cursor, explicit = self.hover
+            self.hover = None
             widget = ref()
             if widget is not None and isValid(widget):
                 widget.setCursor(cursor) if explicit else widget.unsetCursor()
-            self.hover = None
+
+    def set_hover_cursor(self, widget, cursor):
+        if self.hover:
+            if self.hover[0]() is widget:
+                if widget.cursor().shape() != cursor:
+                    widget.setCursor(cursor)
+                return
+            self.restore_cursor()
+        self.hover = (weakref.ref(widget), widget.cursor(), widget.testAttribute(Qt.WA_SetCursor))
+        widget.setCursor(cursor)
 
     def close(self):
         self.finish(commit=False)
@@ -48,30 +58,34 @@ class FloatingResizeInput(QObject):
                 return True
             elif kind == QEvent.ApplicationDeactivate or (watched is window and kind in (QEvent.Hide, QEvent.Close, QEvent.UngrabMouse)):
                 self.finish(commit=False)
-        if kind == QEvent.Leave:
+        if kind == QEvent.Leave and self.hover and self.hover[0]() is watched:
             self.restore_cursor()
         if kind not in (QEvent.MouseMove, QEvent.MouseButtonPress) or not isinstance(watched, QWidget):
             return False
-        self.restore_cursor()
-        if event.modifiers() & Qt.ControlModifier:
+        if (event.modifiers() & Qt.ControlModifier
+                or (kind == QEvent.MouseMove and event.buttons() != Qt.NoButton)):
+            self.restore_cursor()
             return False
         window = watched
         while window is not None and not hasattr(window, '_apply_corner_resize'):
             window = window.parentWidget()
         if window is None or window._wall_controller() is not self.wall:
+            self.restore_cursor()
             return False
         # A dialog may have the viewer as its QObject parent while being an
         # independent top-level window. Its controls must keep their clicks.
         if watched.window() is not window:
+            self.restore_cursor()
             return False
         if watched is getattr(window, '_close_button', None):
+            self.restore_cursor()
             return False
         zone = window._resize_zone_from_local_pos(window.mapFromGlobal(event.globalPosition().toPoint()))
         if zone is None:
+            self.restore_cursor()
             return False
         if kind == QEvent.MouseMove:
-            self.hover = (weakref.ref(watched), watched.cursor(), watched.testAttribute(Qt.WA_SetCursor))
-            watched.setCursor(window._cursor_for_resize_zone(zone))
+            self.set_hover_cursor(watched, window._cursor_for_resize_zone(zone))
         elif event.button() == Qt.LeftButton:
             window._begin_window_resize(event, zone)
             self.active = weakref.ref(window)
