@@ -623,7 +623,28 @@ def run_gui(argv: list[str] | None = None):
         except Exception as e:
             print(f"[WARNING] Could not install Windows console handler: {e}")
 
-    exit_code = int(app.exec())
+    # Native hangs need a trace before the user force-closes the process.
+    # A healthy GUI rearms this independent faulthandler watchdog every second.
+    hang_watchdog = None
+    if ENABLE_FATAL_CRASH_DUMPS and _fatal_log_handle is not None:
+        hang_watchdog = QTimer(app)
+        hang_watchdog.setInterval(1000)
+
+        def rearm_hang_watchdog():
+            faulthandler.dump_traceback_later(
+                15, repeat=True, file=_fatal_log_handle, exit=False,
+            )
+
+        hang_watchdog.timeout.connect(rearm_hang_watchdog)
+        rearm_hang_watchdog()
+        hang_watchdog.start()
+
+    try:
+        exit_code = int(app.exec())
+    finally:
+        if hang_watchdog is not None:
+            hang_watchdog.stop()
+            faulthandler.cancel_dump_traceback_later()
     if hasattr(main_window, 'shutdown_background_workers'):
         main_window.shutdown_background_workers()
     # Some third-party/background worker threads can linger and delay process
