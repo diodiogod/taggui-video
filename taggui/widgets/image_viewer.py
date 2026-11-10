@@ -2145,7 +2145,7 @@ class ImageViewer(QWidget):
         focus_scene_pos=None,
         anchor_view_pos=None,
     ):
-        """Apply one uniform zoom scale around current scene center."""
+        """Apply a uniform scale, centering or anchoring the given scene point."""
         if scale <= 0:
             return
         scene_rect = self.scene.sceneRect()
@@ -2248,6 +2248,14 @@ class ImageViewer(QWidget):
                 # detail zoom memory" before applying the normal fit/fill action.
                 self.clear_saved_double_click_detail_zoom()
 
+            zoom_anchor_view_pos = view_anchor_pos
+            if click_inside_media and settings.value(
+                'viewer_double_click_zoom_center_on_click',
+                defaultValue=DEFAULT_SETTINGS['viewer_double_click_zoom_center_on_click'],
+                type=bool,
+            ):
+                zoom_anchor_view_pos = None
+
             # Priority toggle: if we previously stored a zoom scale for this
             # floating viewer, restore it first when current view is unpannable.
             # This keeps double-click acting as a zoom in/out toggle, even when
@@ -2265,7 +2273,7 @@ class ImageViewer(QWidget):
                     target_scale,
                     zoom_to_fit_state=False,
                     focus_scene_pos=scene_anchor_pos,
-                    anchor_view_pos=view_anchor_pos,
+                    anchor_view_pos=zoom_anchor_view_pos,
                 )
                 self._floating_last_auto_double_click_zoom_scale = target_scale
                 return True
@@ -2277,7 +2285,7 @@ class ImageViewer(QWidget):
                     target_scale,
                     zoom_to_fit_state=False,
                     focus_scene_pos=scene_anchor_pos,
-                    anchor_view_pos=view_anchor_pos,
+                    anchor_view_pos=zoom_anchor_view_pos,
                 )
                 self._floating_last_auto_double_click_zoom_scale = target_scale
                 if not self.is_spawned_viewer:
@@ -2292,7 +2300,7 @@ class ImageViewer(QWidget):
                     target_scale,
                     zoom_to_fit_state=False,
                     focus_scene_pos=scene_anchor_pos,
-                    anchor_view_pos=view_anchor_pos,
+                    anchor_view_pos=zoom_anchor_view_pos,
                 )
                 self._floating_last_auto_double_click_zoom_scale = target_scale
                 if not self.is_spawned_viewer:
@@ -2340,7 +2348,7 @@ class ImageViewer(QWidget):
                         target_scale,
                         zoom_to_fit_state=False,
                         focus_scene_pos=scene_anchor_pos,
-                        anchor_view_pos=view_anchor_pos,
+                        anchor_view_pos=zoom_anchor_view_pos,
                     )
                     self._floating_last_auto_double_click_zoom_scale = target_scale
                     return True

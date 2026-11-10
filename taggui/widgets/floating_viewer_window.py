@@ -494,6 +494,7 @@ class FloatingViewerWindow(WallGeometryInteraction, QWidget):
         self._corner_widget_to_corner: dict[QWidget, str] = {}
         self._edge_resize_widgets: dict[str, QWidget] = {}
         self._edge_widget_to_edge: dict[QWidget, str] = {}
+        self._use_widget_resize_handles = False
         self._resize_active = False
         self._resize_corner = None
         self._resize_start_geometry = QRect()
@@ -565,7 +566,6 @@ class FloatingViewerWindow(WallGeometryInteraction, QWidget):
         self._create_drag_handles()
         self._create_corner_resize_handles()
         self._create_edge_resize_handles()
-        self._use_widget_resize_handles = False
         self._disable_widget_resize_handles()
 
         self.viewer.installEventFilter(self)

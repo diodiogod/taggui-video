@@ -2146,7 +2146,19 @@ class SettingsDialog(QDialog):
         display_grid.addWidget(floating_detail_zoom_spin_box, 6, 1,
                                Qt.AlignmentFlag.AlignLeft)
 
-        display_grid.addWidget(QLabel('Floating hold opacity (%)'), 7, 0,
+        display_grid.addWidget(QLabel('Center clicked detail on double-click zoom'), 7, 0,
+                               Qt.AlignmentFlag.AlignRight)
+        double_click_zoom_center_check_box = SettingsBigCheckBox(
+            key='viewer_double_click_zoom_center_on_click')
+        double_click_zoom_center_check_box.setToolTip(
+            'Center the clicked image or video detail when double-clicking zooms in.\n'
+            'Turn off to keep the detail under the mouse pointer instead.\n'
+            'Near the edges, centering is limited by the image bounds.\n'
+            'Applied live (no restart).')
+        display_grid.addWidget(double_click_zoom_center_check_box, 7, 1,
+                               Qt.AlignmentFlag.AlignLeft)
+
+        display_grid.addWidget(QLabel('Floating hold opacity (%)'), 8, 0,
                                Qt.AlignmentFlag.AlignRight)
         floating_hold_opacity_slider = SettingsSlider(
             key='floating_viewer_hold_opacity',
@@ -2160,10 +2172,10 @@ class SettingsDialog(QDialog):
             '100 = fully opaque.\n'
             'Applied live.'
         )
-        display_grid.addWidget(floating_hold_opacity_slider, 7, 1,
+        display_grid.addWidget(floating_hold_opacity_slider, 8, 1,
                                Qt.AlignmentFlag.AlignLeft)
 
-        display_grid.addWidget(QLabel('Floating resize keeps aspect ratio by default'), 8, 0,
+        display_grid.addWidget(QLabel('Floating resize keeps aspect ratio by default'), 9, 0,
                                Qt.AlignmentFlag.AlignRight)
         floating_resize_preserve_aspect_check_box = SettingsBigCheckBox(
             key='floating_resize_preserve_aspect_by_default'
@@ -2176,7 +2188,7 @@ class SettingsDialog(QDialog):
             'hold Shift to preserve aspect ratio.\n'
             'Applied live (no restart).'
         )
-        display_grid.addWidget(floating_resize_preserve_aspect_check_box, 8, 1,
+        display_grid.addWidget(floating_resize_preserve_aspect_check_box, 9, 1,
                                Qt.AlignmentFlag.AlignLeft)
 
         workflow_grid.addWidget(QLabel('Image double-click action'), 1, 0,

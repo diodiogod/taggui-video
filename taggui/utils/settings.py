@@ -69,6 +69,7 @@ DEFAULT_SETTINGS = {
     'floating_wall_preserve_manual_sizes': True,
     'floating_wall_manual_shortcut': 'Ctrl+Alt+M',
     'floating_double_click_detail_zoom_percent': 400,  # 400% => 4x fallback zoom on floating double-click detail jump
+    'viewer_double_click_zoom_center_on_click': True,
     'floating_resize_preserve_aspect_by_default': False,
     'floating_viewer_hold_opacity': 46,  # Hold mode opacity in percent (0 = fully transparent, 100 = fully opaque)
     'image_list_double_click_action': 'spawn viewer',  # spawn viewer, system default app, generation prompt viewer
