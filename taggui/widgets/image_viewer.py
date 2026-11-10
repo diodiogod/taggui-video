@@ -3,6 +3,7 @@ import time
 from PySide6.QtCore import (QEvent, QModelIndex, QPersistentModelIndex, QPoint, QPointF,
                             QRect, QRectF, QSize, Qt, Signal, Slot, QTimer)
 from PySide6.QtGui import QColor, QCursor, QFont, QImage, QKeySequence, QPainter, QPainterPath, QPen, QPixmap, QShortcut, QTransform
+from PySide6.QtOpenGLWidgets import QOpenGLWidget
 from PySide6.QtWidgets import (QGraphicsItem, QGraphicsPixmapItem, QGraphicsRectItem,
                                QGraphicsScene, QGraphicsSimpleTextItem, QGraphicsView,
                                QVBoxLayout, QWidget, QStyleOptionGraphicsItem)
@@ -631,6 +632,7 @@ class ImageViewer(QWidget):
         self._static_source_size = QSize()
         self._static_mipmap_pixmaps: dict[int, QPixmap] = {}
         self._static_current_mip_divisor = 1
+        self._static_image_quality_pending = False
 
         # Timer for auto-hiding controls
         self._controls_hide_timer = QTimer(self)
@@ -808,6 +810,7 @@ class ImageViewer(QWidget):
         self._static_source_size = QSize()
         self._static_mipmap_pixmaps = {}
         self._static_current_mip_divisor = 1
+        self._static_image_quality_pending = False
 
     def dominant_ideogram_colors_for_rect(
         self,
@@ -988,6 +991,7 @@ class ImageViewer(QWidget):
             self.current_image_item = None
             return
         if bool(getattr(self, "_fast_pan_visual_mode", False)):
+            self._static_image_quality_pending = True
             return
 
         source_size = self._effective_static_source_size()
@@ -998,6 +1002,15 @@ class ImageViewer(QWidget):
         pixmap = self._get_static_mipmap_pixmap(divisor)
         if pixmap.isNull():
             return
+        self._static_image_quality_pending = False
+
+        # Crossing 100% can change filtering without changing mip level.
+        mode = self._still_transform_mode()
+        self.current_image_item.setTransformationMode(mode)
+        for layer in self._compare_layers:
+            overlay = layer.get("overlay_item")
+            if overlay is not None:
+                overlay.setTransformationMode(mode)
 
         current_scale = 1.0
         try:
@@ -1020,8 +1033,7 @@ class ImageViewer(QWidget):
         try:
             self.current_image_item.setPixmap(pixmap)
             self.current_image_item.setScale(float(divisor))
-            self.current_image_item.setCacheMode(QGraphicsItem.NoCache)
-            self.current_image_item.setTransformationMode(Qt.TransformationMode.SmoothTransformation)
+            self.current_image_item.setCacheMode(self._static_image_cache_mode(pixmap))
         except RuntimeError:
             self.current_image_item = None
             return
@@ -1105,6 +1117,24 @@ class ImageViewer(QWidget):
         except Exception:
             pass
 
+    def _static_image_cache_mode(self, pixmap, *, fast_pan: bool = False):
+        # Qt's OpenGL paint engine downsizes an entire pixmap when either side
+        # exceeds its texture limit, even if only a small region is visible.
+        # A device-coordinate cache renders that visible region at screen
+        # resolution before it reaches OpenGL. Keep the zoom-out mipmaps and
+        # the raster-viewport behavior unchanged.
+        # Conservative bound from the affected viewer. Use the active mip's
+        # dimensions, so fitting even an enormous original can draw directly.
+        if fast_pan or (isinstance(self.view.viewport(), QOpenGLWidget)
+                        and max(pixmap.width(), pixmap.height()) > 8192):
+            return QGraphicsItem.DeviceCoordinateCache
+        return QGraphicsItem.NoCache
+
+    def _still_transform_mode(self):
+        if self._fast_pan_visual_mode or self.view.transform().m11() >= 1.0:
+            return Qt.TransformationMode.FastTransformation
+        return Qt.TransformationMode.SmoothTransformation
+
     def _set_fast_pan_visual_mode(self, enabled: bool):
         """Temporarily trade filtering quality for smoother still-image panning."""
         enabled = bool(enabled) and not bool(getattr(self, "_is_video_loaded", False))
@@ -1113,16 +1143,7 @@ class ImageViewer(QWidget):
 
         self._fast_pan_visual_mode = enabled
         smooth = not enabled
-        transform_mode = (
-            Qt.TransformationMode.FastTransformation
-            if enabled else
-            Qt.TransformationMode.SmoothTransformation
-        )
-        cache_mode = (
-            QGraphicsItem.DeviceCoordinateCache
-            if enabled else
-            QGraphicsItem.NoCache
-        )
+        transform_mode = self._still_transform_mode()
 
         try:
             self.view.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, smooth)
@@ -1143,12 +1164,21 @@ class ImageViewer(QWidget):
             except Exception:
                 pass
             try:
-                item.setCacheMode(cache_mode)
+                item.setCacheMode(self._static_image_cache_mode(item.pixmap(), fast_pan=enabled))
             except Exception:
                 pass
             try:
                 item.update()
             except Exception:
+                pass
+
+        if not enabled and self._static_image_quality_pending:
+            # A zoom during panning defers mip changes until the drag ends.
+            # Use this viewer's transform; the marking zoom factor is shared.
+            try:
+                scale = abs(float(self.view.transform().m11()))
+                self._apply_static_image_quality_for_scale(scale if scale > 0 else None)
+            except (AttributeError, RuntimeError, TypeError, ValueError):
                 pass
 
         try:
@@ -1248,7 +1278,9 @@ class ImageViewer(QWidget):
         self.scene.addItem(clip_item)
 
         overlay_item = QGraphicsPixmapItem(prepared_pixmap)
-        overlay_item.setTransformationMode(Qt.TransformationMode.SmoothTransformation)
+        overlay_item.setTransformationMode(self._still_transform_mode())
+        overlay_item.setCacheMode(self._static_image_cache_mode(
+            prepared_pixmap, fast_pan=bool(self._fast_pan_visual_mode)))
         overlay_item.setAcceptedMouseButtons(Qt.MouseButton.NoButton)
         overlay_item.setZValue(1.0)
         overlay_item.setParentItem(clip_item)
@@ -4097,6 +4129,83 @@ class ImageViewer(QWidget):
                 and self._loaded_video_mtime == image.mtime
                 and item.scene() is self.scene)
 
+    def _loading_thumbnail_item(self, image):
+        # DecorationRole may read disk synchronously. Use only pixels already
+        # held by this media object, and only full-frame thumbnails.
+        if image.crop is not None or getattr(image, '_thumbnail_crop_key', None) is not None:
+            return None
+        icon = image.thumbnail
+        sizes = icon.availableSizes() if icon else []
+        if sizes:
+            pixmap = icon.pixmap(max(sizes, key=lambda size: size.width() * size.height()))
+        elif image.thumbnail_qimage is not None:
+            pixmap = QPixmap.fromImage(image.thumbnail_qimage)
+        else:
+            return None
+        if pixmap.isNull():
+            return None
+        item = QGraphicsPixmapItem(pixmap)
+        dimensions = image.dimensions_qsize()
+        if dimensions is not None:
+            bounds = item.boundingRect()
+            item.setTransform(QTransform.fromScale(dimensions.width() / bounds.width(),
+                                                   dimensions.height() / bounds.height()))
+        item.setTransformationMode(Qt.TransformationMode.SmoothTransformation)
+        item.setAcceptedMouseButtons(Qt.MouseButton.NoButton)
+        return item
+
+    def _frame_selected_media(self):
+        mode = self.get_zoom_follow_mode()
+        if mode == ZOOM_FOLLOW_MODE_FIT_LOCK:
+            scene_rect = self.scene.sceneRect()
+            viewport_rect = self.view.viewport().rect()
+            if scene_rect.width() > 0 and scene_rect.height() > 0 and viewport_rect.width() > 0 and viewport_rect.height() > 0:
+                fit_w = viewport_rect.width() / scene_rect.width()
+                fit_h = viewport_rect.height() / scene_rect.height()
+                target_scale = max(fit_w, fit_h) * 1.0004
+                anchor_focus = self._zoom_follow_focus_for_scale(target_scale, scene_rect, viewport_rect)
+                self._apply_uniform_zoom_scale(
+                    max(1e-9, min(16.0, float(target_scale))),
+                    zoom_to_fit_state=False,
+                    focus_scene_pos=anchor_focus,
+                )
+            else:
+                self.zoom_fit()
+        elif mode == ZOOM_FOLLOW_MODE_SCALE_LOCK:
+            locked_detail_ratio = getattr(self, "_zoom_follow_locked_detail_ratio", None)
+            scene_rect = self.scene.sceneRect()
+            viewport_rect = self.view.viewport().rect()
+            fit_scale = self._compute_fit_scale(scene_rect, viewport_rect)
+            if (isinstance(fit_scale, (int, float))
+                    and float(fit_scale) > 0
+                    and scene_rect.width() > 0 and scene_rect.height() > 0
+                    and viewport_rect.width() > 0 and viewport_rect.height() > 0):
+                ratio = 1.0
+                if isinstance(locked_detail_ratio, (int, float)) and float(locked_detail_ratio) > 0:
+                    ratio = max(1e-6, min(1e6, float(locked_detail_ratio)))
+                requested_scale = float(fit_scale) * ratio
+                # Lock mode uses fit as 100% baseline to keep "fully zoomed out"
+                # consistent across images with different dimensions/aspects.
+                target_scale = max(requested_scale, float(fit_scale))
+                anchor_focus = self._zoom_follow_focus_for_scale(target_scale, scene_rect, viewport_rect)
+                self._suspend_zoom_follow_locked_scale_sync = True
+                try:
+                    self._apply_uniform_zoom_scale(
+                        max(1e-9, min(16.0, float(target_scale))),
+                        zoom_to_fit_state=False,
+                        focus_scene_pos=anchor_focus,
+                    )
+                finally:
+                    self._suspend_zoom_follow_locked_scale_sync = False
+            else:
+                self.zoom_fit()
+        else:
+            self.zoom_fit()
+
+    def _preview_view_state(self):
+        return (self.view.transform().m11(), self.view.horizontalScrollBar().value(),
+                self.view.verticalScrollBar().value())
+
     def _load_image_impl(self, proxy_image_index: QModelIndex, is_complete = True, *, decoded_image=None):
         if self._viewer_model_resetting:
             return
@@ -4174,20 +4283,32 @@ class ImageViewer(QWidget):
         )
 
         if is_complete:
+            preview_navigation = None
+            initial_view = getattr(self, '_loading_thumbnail_initial_view', None)
+            if decoded_image is not None and initial_view is not None:
+                current_view = self._preview_view_state()
+                if current_view != initial_view:
+                    bounds = self._loading_image_item.sceneBoundingRect()
+                    center = self.view.mapToScene(self.view.viewport().rect().center())
+                    preview_navigation = (current_view, bounds, center, self.is_zoom_to_fit)
+            self._loading_thumbnail_initial_view = None
             # Keep only non-interactive pixels while a still image decodes.
             # Reuse this placeholder during rapid replacement selections;
             # never retain the previous image's editable scene items.
             retained_frame = None
+            preview = None
             if not image.is_video and decoded_image is None:
+                preview = self._loading_thumbnail_item(image)
                 previous = (self.current_image_item or self.current_video_item
                             or getattr(self, '_loading_image_item', None))
-                if (previous is not None
+                if (preview is None and previous is not None
                         and (_shiboken_is_valid is None or _shiboken_is_valid(previous))
                         and not previous.pixmap().isNull()):
                     retained_frame = QGraphicsPixmapItem(previous.pixmap())
                     retained_frame.setOffset(previous.offset())
                     retained_frame.setTransform(previous.sceneTransform())
-                    retained_frame.setTransformationMode(Qt.TransformationMode.SmoothTransformation)
+                    retained_frame.setTransformationMode(previous.transformationMode())
+                    retained_frame.setCacheMode(previous.cacheMode())
             self._loading_image_item = None
             self._clear_marking_items_from_scene()
             self.ideogram_overlay_items.clear()
@@ -4198,7 +4319,11 @@ class ImageViewer(QWidget):
             self.view.clear_scene()
             self.current_image_item = None
             self.current_video_item = None
-            if retained_frame is not None:
+            if preview is not None:
+                self.scene.addItem(preview)
+                self._loading_image_item = preview
+                self._set_scene_rect_for_item(preview)
+            elif retained_frame is not None:
                 self.scene.addItem(retained_frame)
                 self._loading_image_item = retained_frame
             auto_play_after_layout = False
@@ -4316,7 +4441,10 @@ class ImageViewer(QWidget):
                         getattr(source, '_directory_path', None))
                     self.view.setEnabled(False)
                     self.accept_crop_addition.emit(False)
-                    if retained_frame is None:
+                    if preview is not None:
+                        self._frame_selected_media()
+                        self._loading_thumbnail_initial_view = self._preview_view_state()
+                    elif retained_frame is None:
                         loading = QGraphicsSimpleTextItem('Loading image…')
                         loading.setBrush(QColor('#aaaaaa'))
                         self.scene.addItem(loading)
@@ -4331,10 +4459,9 @@ class ImageViewer(QWidget):
                 self._static_current_mip_divisor = 1
                 self._schedule_deferred_extension_repair(image)
 
-                # Use standard pixmap item with SmoothTransformation
                 image_item = QGraphicsPixmapItem(pixmap)
-                image_item.setTransformationMode(Qt.TransformationMode.SmoothTransformation)
-                image_item.setCacheMode(QGraphicsItem.NoCache)
+                image_item.setTransformationMode(self._still_transform_mode())
+                image_item.setCacheMode(self._static_image_cache_mode(pixmap))
                 image_item.setZValue(0)
                 self._set_scene_rect_for_item(image_item)
                 self.scene.addItem(image_item)
@@ -4344,52 +4471,23 @@ class ImageViewer(QWidget):
                 self._fast_pan_visual_mode = True
                 self._set_fast_pan_visual_mode(False)
 
-            mode = self.get_zoom_follow_mode()
-            if mode == ZOOM_FOLLOW_MODE_FIT_LOCK:
-                scene_rect = self.scene.sceneRect()
-                viewport_rect = self.view.viewport().rect()
-                if scene_rect.width() > 0 and scene_rect.height() > 0 and viewport_rect.width() > 0 and viewport_rect.height() > 0:
-                    fit_w = viewport_rect.width() / scene_rect.width()
-                    fit_h = viewport_rect.height() / scene_rect.height()
-                    target_scale = max(fit_w, fit_h) * 1.0004
-                    anchor_focus = self._zoom_follow_focus_for_scale(target_scale, scene_rect, viewport_rect)
-                    self._apply_uniform_zoom_scale(
-                        max(1e-9, min(16.0, float(target_scale))),
-                        zoom_to_fit_state=False,
-                        focus_scene_pos=anchor_focus,
-                    )
-                else:
-                    self.zoom_fit()
-            elif mode == ZOOM_FOLLOW_MODE_SCALE_LOCK:
-                locked_detail_ratio = getattr(self, "_zoom_follow_locked_detail_ratio", None)
-                scene_rect = self.scene.sceneRect()
-                viewport_rect = self.view.viewport().rect()
-                fit_scale = self._compute_fit_scale(scene_rect, viewport_rect)
-                if (isinstance(fit_scale, (int, float))
-                        and float(fit_scale) > 0
-                        and scene_rect.width() > 0 and scene_rect.height() > 0
-                        and viewport_rect.width() > 0 and viewport_rect.height() > 0):
-                    ratio = 1.0
-                    if isinstance(locked_detail_ratio, (int, float)) and float(locked_detail_ratio) > 0:
-                        ratio = max(1e-6, min(1e6, float(locked_detail_ratio)))
-                    requested_scale = float(fit_scale) * ratio
-                    # Lock mode uses fit as 100% baseline to keep "fully zoomed out"
-                    # consistent across images with different dimensions/aspects.
-                    target_scale = max(requested_scale, float(fit_scale))
-                    anchor_focus = self._zoom_follow_focus_for_scale(target_scale, scene_rect, viewport_rect)
-                    self._suspend_zoom_follow_locked_scale_sync = True
-                    try:
-                        self._apply_uniform_zoom_scale(
-                            max(1e-9, min(16.0, float(target_scale))),
-                            zoom_to_fit_state=False,
-                            focus_scene_pos=anchor_focus,
-                        )
-                    finally:
-                        self._suspend_zoom_follow_locked_scale_sync = False
-                else:
-                    self.zoom_fit()
+            if preview_navigation is None:
+                self._frame_selected_media()
             else:
-                self.zoom_fit()
+                (scale, scroll_x, scroll_y), bounds, center, fitted = preview_navigation
+                original = self.current_image_item.sceneBoundingRect()
+                # Missing or stale metadata can give the preview a different
+                # coordinate system. Preserve relative focus and fit-relative zoom.
+                viewport = self.view.viewport().rect()
+                if original != bounds and not viewport.isEmpty():
+                    scale *= (self._compute_fit_scale(original, viewport)
+                              / self._compute_fit_scale(bounds, viewport))
+                focus = QPointF(center.x() * original.width() / bounds.width(),
+                                center.y() * original.height() / bounds.height())
+                self._apply_uniform_zoom_scale(scale, fitted, focus_scene_pos=focus)
+                if original == bounds:
+                    self.view.horizontalScrollBar().setValue(scroll_x)
+                    self.view.verticalScrollBar().setValue(scroll_y)
             self.hud_item = ResizeHintHUD(MarkingItem.image_size)
             self.scene.addItem(self.hud_item)
             if auto_play_after_layout:
