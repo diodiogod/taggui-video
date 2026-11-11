@@ -9,6 +9,10 @@ Markings are the visual annotation system in TagGUI Video 1M.
 
 They let you do more than text tagging: you can define crop areas, mark regions as hints, and build include or exclude masks for export and training workflows.
 
+For quick review symbols at individual image points, see the
+[Stickers Guide](STICKERS_GUIDE.md). Stickers use badges, hearts, and bombs without
+defining a crop or mask region.
+
 <p align="center">
   <img src="../images/markings-guide-crop-include-exclude.jpg" alt="Crop include and exclude markings" width="78%">
 </p>
@@ -197,4 +201,5 @@ These are useful when you want to inspect the image cleanly or verify how masks 
 
 - [Export Guide](EXPORT_GUIDE.md)
 - [Filtering Guide](FILTERING_GUIDE.md)
+- [Stickers Guide](STICKERS_GUIDE.md)
 - [Captioning Guide](CAPTIONING_GUIDE.md)

@@ -180,6 +180,15 @@ The detachable **Review toolbar** provides the same actions. **Clear → Clear
 Selected** clears the current review target; **Clear → Clear Current Folder**
 asks for confirmation before clearing the folder's badges.
 
+For review marks on individual details within an image, use
+[stickers](STICKERS_GUIDE.md). Place and edit them in the main viewer; floating
+wall viewers display the saved positions. They are separate from the wall's
+fixed 3×3 review slots and the thumbnail badges.
+
+Badge shortcuts place stickers when the pointer is over the main image. Move
+the pointer away from that image to use the normal badge toggle. Clearing a
+badge removes its matching stickers; other sticker types remain.
+
 ## Common Questions
 
 **Why didn't the wall rearrange after resizing?**
@@ -210,4 +219,5 @@ floating viewers; Ctrl-drag there is available for wall positioning.
 - [Floating Viewers User Guide](FLOATING_VIEWERS_USER_GUIDE.md): spawning, moving, zooming, and hold mode.
 - [Compare Guide](COMPARE_GUIDE.md): comparison and merging.
 - [Filtering Guide](FILTERING_GUIDE.md): filtering by review marks.
+- [Stickers Guide](STICKERS_GUIDE.md): positioned review badges, hearts, and bombs.
 - [Shortcuts](SHORTCUTS.md): other keyboard controls.

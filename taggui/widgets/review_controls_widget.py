@@ -1,6 +1,7 @@
 """Compact toolbar widget for structured review marks."""
 
-from PySide6.QtCore import QSize, Qt, Signal
+from PySide6.QtGui import QDrag
+from PySide6.QtCore import QMimeData, QSize, Qt, Signal
 from PySide6.QtWidgets import QApplication, QFrame, QHBoxLayout, QMenu, QToolButton
 
 from utils.review_marks import (
@@ -10,6 +11,30 @@ from utils.review_marks import (
     get_review_badge_specs,
     get_review_badge_text_color,
 )
+
+
+BADGE_MIME = 'application/x-taggui-review-badge'
+
+
+class BadgeButton(QToolButton):
+    def mousePressEvent(self, event):
+        self._press_pos = event.position().toPoint()
+        super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event):
+        if (self.isDown() and event.buttons() & Qt.MouseButton.LeftButton
+                and (event.position().toPoint() - self._press_pos).manhattanLength()
+                >= QApplication.startDragDistance()):
+            drag = QDrag(self)
+            mime = QMimeData()
+            mime.setData(BADGE_MIME, self.badge_id.encode())
+            drag.setMimeData(mime)
+            drag.setPixmap(self.grab())
+            drag.setHotSpot(self.rect().center())
+            self.setDown(False)
+            drag.exec(Qt.DropAction.CopyAction)
+            return
+        super().mouseMoveEvent(event)
 
 
 class ReviewControlsWidget(QFrame):
@@ -66,9 +91,10 @@ class ReviewControlsWidget(QFrame):
         self._layout.addWidget(self._clear_button)
 
     def _make_button(self, badge_id: str, text: str, title: str) -> QToolButton:
-        button = QToolButton(self)
+        button = BadgeButton(self)
+        button.badge_id = badge_id
         button.setText(str(text or ''))
-        button.setToolTip(str(title or 'Add badge to image'))
+        button.setToolTip(f'{title or text} - Click to toggle, drag onto the image to place a sticker')
         button.setCheckable(True)
         button.setAutoRaise(False)
         button.setCursor(Qt.CursorShape.PointingHandCursor)
@@ -115,7 +141,7 @@ class ReviewControlsWidget(QFrame):
             checked = (not mixed) and (spec.badge_id in active_ids)
             button.setChecked(checked)
             button.setText(spec.label)
-            button.setToolTip(str(spec.title or 'Add badge to image'))
+            button.setToolTip(f'{spec.title or spec.label} - Click to toggle, drag onto the image to place a sticker')
             button.blockSignals(blocker)
             self._apply_button_style(button, spec.color, checked, mixed)
         self._apply_clear_button_style()

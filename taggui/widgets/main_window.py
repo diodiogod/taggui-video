@@ -45,6 +45,9 @@ from utils.review_marks import (
     REVIEW_BADGE_FONT_SIZE_SETTINGS_KEY,
     REVIEW_BADGE_TEXT_COLOR_SETTINGS_KEY,
     ReviewFlag,
+    get_review_badge_spec_for_flag,
+    get_review_badge_spec_for_id,
+    get_review_badge_spec_for_rank,
     get_review_shortcut_action,
     normalize_review_state,
     serialize_review_flags,
@@ -99,6 +102,37 @@ def _get_loaded_video_player(main_window):
     """Return the constructed video player, if lazy video support has created one."""
     image_viewer = getattr(main_window, 'image_viewer', None)
     return getattr(image_viewer, 'video_player', None)
+
+
+def _removed_review_badge_ids(current_rank, current_flags, next_rank, next_flags):
+    """Return badge types removed by a review-state transition."""
+    removed = set()
+    if current_rank and int(current_rank) != int(next_rank):
+        spec = get_review_badge_spec_for_rank(current_rank)
+        if spec is not None:
+            removed.add(spec.badge_id)
+    removed_flags = int(current_flags) & ~int(next_flags)
+    for flag in (
+        ReviewFlag.REJECT,
+        ReviewFlag.WARNING,
+        ReviewFlag.QUESTION,
+        ReviewFlag.IDEA,
+    ):
+        if not (removed_flags & int(flag)):
+            continue
+        spec = get_review_badge_spec_for_flag(flag)
+        if spec is not None:
+            removed.add(spec.badge_id)
+    return removed
+
+
+def _last_review_sticker_rank(stickers) -> int:
+    """Return the most recently placed remaining rank sticker, if any."""
+    for sticker in reversed(tuple(stickers or ())):
+        spec = get_review_badge_spec_for_id(sticker.badge_id)
+        if spec is not None and spec.kind == 'rank' and spec.rank:
+            return int(spec.rank)
+    return 0
 
 
 class PerfHudOverlay(QWidget):
@@ -667,6 +701,10 @@ class MainWindow(QMainWindow):
         self.set_font_size()
         self.image_viewer = ImageViewer(self.proxy_image_list_model, is_spawned_viewer=False)
         self.image_viewer.marking_effects_controller = self.marking_effects_controller
+        if sys.platform == 'win32':
+            from widgets.windows_sticker_input import enable_foreground_mouse_input
+            self._raw_sticker_mouse = enable_foreground_mouse_input()
+        self.image_viewer.sticker_controls.edited.connect(self._commit_review_sticker)
         self.image_viewer.set_video_loop_persistence_scope('main')
         self._floating_viewers = []
         self._floating_space_move_active = False
@@ -1323,6 +1361,11 @@ class MainWindow(QMainWindow):
                     if event.type() == event.Type.ShortcutOverride:
                         event.accept()
                         return True
+                    if self.image_viewer.sticker_controls.shortcut(
+                        'reaction', reaction_name
+                    ):
+                        event.accept()
+                        return True
                     if self._toggle_current_reaction(reaction_name):
                         event.accept()
                         return True
@@ -1339,6 +1382,9 @@ class MainWindow(QMainWindow):
                         event.accept()
                         return True
                     action_kind, action_value = review_shortcut_action
+                    if self.image_viewer.sticker_controls.shortcut(action_kind, action_value):
+                        event.accept()
+                        return True
                     if action_kind == 'rank':
                         handled = self._toggle_current_review_rank(int(action_value or 0))
                     else:
@@ -1715,6 +1761,12 @@ class MainWindow(QMainWindow):
             super().dropEvent(event)
         return
 
+    def nativeEvent(self, event_type, message):
+        if getattr(self, '_raw_sticker_mouse', False):
+            from widgets.windows_sticker_input import handle_raw_mouse
+            handle_raw_mouse(message, self.image_viewer.sticker_controls)
+        return super().nativeEvent(event_type, message)
+
     def closeEvent(self, event: QCloseEvent):
         """Save the window geometry and state before closing."""
         print("[SHUTDOWN] closeEvent triggered")
@@ -1937,6 +1989,9 @@ class MainWindow(QMainWindow):
                 toolbar_manager.refresh_video_training_profile()
             return
 
+        if key == 'review_sticker_size':
+            self._refresh_review_sticker_overlays()
+            return
         if key in (
             REVIEW_BADGE_SCHEMA_SETTINGS_KEY,
             REVIEW_BADGE_TEXT_COLOR_SETTINGS_KEY,
@@ -4054,8 +4109,36 @@ class MainWindow(QMainWindow):
             )
             next_rank, next_flags = transform(current_rank, current_flags)
             next_rank, next_flags = normalize_review_state(next_rank, next_flags)
-            if (current_rank, current_flags) != (next_rank, next_flags):
+            rank_clear_requested = (
+                action_name == 'Change review rank'
+                and current_rank > 0
+                and next_rank == 0
+                and not (next_flags & int(ReviewFlag.REJECT))
+            )
+            removed_badge_ids = _removed_review_badge_ids(
+                current_rank, current_flags, next_rank, next_flags
+            )
+            current_stickers = tuple(getattr(image, 'review_stickers', ()) or ())
+            next_stickers = tuple(
+                sticker for sticker in current_stickers
+                if sticker.badge_id not in removed_badge_ids
+            )
+            if rank_clear_requested:
+                next_rank, next_flags = normalize_review_state(
+                    _last_review_sticker_rank(next_stickers), next_flags
+                )
+            current_owned_flags = int(getattr(image, 'sticker_owned_flags', 0) or 0)
+            next_owned_flags = current_owned_flags & int(next_flags)
+            stickers_changed = (
+                next_stickers != current_stickers
+                or next_owned_flags != current_owned_flags
+            )
+            if (current_rank, current_flags) != (next_rank, next_flags) or stickers_changed:
                 source_model.record_streaming_paginated_review_history(image)
+                if stickers_changed:
+                    image.review_stickers = next_stickers
+                    image.sticker_owned_flags = next_owned_flags
+                    image.stickers_dirty = True
                 image.review_rank = int(next_rank)
                 image.review_flags = int(next_flags)
                 image.review_updated_at = updated_at
@@ -4070,6 +4153,7 @@ class MainWindow(QMainWindow):
         progress.close()
         if changed:
             source_model._reload_loaded_pages_after_paginated_tag_change()
+            self._refresh_review_sticker_overlays(source_model=source_model)
             proxy_model = target_context.get('proxy_model')
             active_filter = getattr(proxy_model, 'filter', None)
             if self._filter_uses_review(active_filter):
@@ -4105,6 +4189,7 @@ class MainWindow(QMainWindow):
             should_ask_for_confirmation=total > 1,
         )
         changed = 0
+        sticker_changed_paths = []
         for position, image in enumerate(batch.iter_images(), start=1):
             updates = dict(updates_for_image(image) or {})
             if updates:
@@ -4112,6 +4197,10 @@ class MainWindow(QMainWindow):
                 for name, value in updates.items():
                     setattr(image, name, value)
                 source_model.write_meta_to_disk(image)
+                if 'love' in updates or 'bomb' in updates:
+                    source_model.save_reactions_to_db(image)
+                if 'review_stickers' in updates:
+                    sticker_changed_paths.append(str(getattr(image, 'path', '') or ''))
                 changed += 1
             if position % 50 == 0 or position == total:
                 progress.setValue(position)
@@ -4122,6 +4211,11 @@ class MainWindow(QMainWindow):
         progress.close()
         if changed:
             source_model._reload_loaded_pages_after_paginated_tag_change()
+            if sticker_changed_paths:
+                self._refresh_review_sticker_overlays(
+                    media_paths=sticker_changed_paths,
+                    source_model=source_model,
+                )
             proxy_model = target_context.get('proxy_model')
             active_filter = getattr(proxy_model, 'filter', None)
             if (
@@ -4198,6 +4292,26 @@ class MainWindow(QMainWindow):
         if widget is not None:
             widget.set_state(int(review_rank or 0), int(review_flags or 0), mixed=bool(mixed))
 
+    def _commit_review_sticker(
+        self,
+        model,
+        image,
+        stickers,
+        owned_flags,
+        rank,
+        flags,
+        action,
+        love=None,
+        bomb=None,
+    ):
+        self._commit_review_state_changes(
+            [(image, rank, flags)], action_name=action, source_model=model,
+            proxy_model=self.image_viewer.proxy_image_list_model,
+            sticker_change=(stickers, owned_flags),
+            reaction_change=(love, bomb),
+        )
+        self.image_viewer.sticker_controls.refresh(self.image_viewer.current_media)
+
     def _commit_review_state_changes(
         self,
         changed_states: list[tuple[Image, int, int]],
@@ -4206,6 +4320,8 @@ class MainWindow(QMainWindow):
         source_model=None,
         proxy_model=None,
         list_view=None,
+        sticker_change=None,
+        reaction_change=None,
     ) -> bool:
         if not changed_states:
             return False
@@ -4231,21 +4347,75 @@ class MainWindow(QMainWindow):
             )
 
         review_updated_at = time.time()
+        reaction_changed_images = []
         for image, next_rank, next_flags in changed_states:
+            current_rank, current_flags = normalize_review_state(
+                getattr(image, 'review_rank', 0),
+                getattr(image, 'review_flags', 0),
+            )
+            rank_clear_requested = (
+                action_name == 'Change review rank'
+                and current_rank > 0
+                and int(next_rank) == 0
+                and not (int(next_flags) & int(ReviewFlag.REJECT))
+            )
+            removed_badge_ids = _removed_review_badge_ids(
+                current_rank, current_flags, next_rank, next_flags
+            )
+            if sticker_change is not None:
+                image.review_stickers, image.sticker_owned_flags = sticker_change
+                image.stickers_dirty = True
+            else:
+                remaining_stickers = tuple(
+                    sticker for sticker in image.review_stickers
+                    if sticker.badge_id not in removed_badge_ids
+                )
+                if rank_clear_requested:
+                    next_rank, next_flags = normalize_review_state(
+                        _last_review_sticker_rank(remaining_stickers), next_flags
+                    )
+                remaining_owned_flags = image.sticker_owned_flags & int(next_flags)
+                if (
+                    remaining_stickers != image.review_stickers
+                    or remaining_owned_flags != image.sticker_owned_flags
+                ):
+                    image.review_stickers = remaining_stickers
+                    image.sticker_owned_flags = remaining_owned_flags
+                    image.stickers_dirty = True
             image.review_rank = int(next_rank)
             image.review_flags = int(next_flags)
             image.review_updated_at = review_updated_at
+            reaction_changed = False
+            if reaction_change is not None:
+                next_love, next_bomb = reaction_change
+                if next_love is not None and bool(image.love) != bool(next_love):
+                    image.love = bool(next_love)
+                    reaction_changed = True
+                if next_bomb is not None and bool(image.bomb) != bool(next_bomb):
+                    image.bomb = bool(next_bomb)
+                    reaction_changed = True
+                if reaction_changed:
+                    image.reaction_updated_at = review_updated_at
+                    reaction_changed_images.append(image)
             # SQL-backed review filters must see the new state before they
             # rebuild. The deferred full persistence below also writes the
             # sidecar, but would otherwise leave this refresh one event behind.
-            try:
-                owner_model.save_review_state_to_db(image)
-            except Exception:
-                pass
-            QTimer.singleShot(
-                0,
-                lambda img=image, model=owner_model: model.persist_review_state(img),
-            )
+            if image.stickers_dirty:
+                owner_model.persist_review_state(image)
+            else:
+                try:
+                    owner_model.save_review_state_to_db(image)
+                except Exception:
+                    pass
+                QTimer.singleShot(
+                    0,
+                    lambda img=image, model=owner_model: model.persist_review_state(img),
+                )
+            if reaction_changed:
+                try:
+                    owner_model.save_reactions_to_db(image)
+                except Exception:
+                    pass
 
         self._emit_image_rows_changed(
             changed_images,
@@ -4253,12 +4423,24 @@ class MainWindow(QMainWindow):
             proxy_model=owner_proxy_model,
             list_view=owner_list_view,
         )
-        self._refresh_review_ui_for_images(changed_images)
+        if reaction_changed_images:
+            self._refresh_reaction_sort_if_active(
+                reaction_changed_images,
+                source_model=owner_model,
+                sync_reactions=True,
+            )
+            self._sync_rating_controls_from_context()
+        self._refresh_review_ui_for_images(changed_images, source_model=owner_model)
         active_filter = getattr(owner_proxy_model, 'filter', None)
         if self._filter_uses_review(active_filter):
             if owner_proxy_model is self.proxy_image_list_model:
                 self._arm_masonry_refresh_anchor()
             self._cover_list_during_filtered_relayout(owner_list_view)
+            owner_proxy_model.set_filter(active_filter)
+        elif (reaction_changed_images
+              and self._filter_uses_reactions(active_filter)):
+            if owner_proxy_model is self.proxy_image_list_model:
+                self._arm_masonry_refresh_anchor()
             owner_proxy_model.set_filter(active_filter)
         return True
 
@@ -4358,57 +4540,78 @@ class MainWindow(QMainWindow):
                     rel_path = image.path.name
                 loaded_by_rel_path[rel_path] = image
 
-            changed_states: list[tuple[Image, int, int]] = []
-            for image in loaded_by_rel_path.values():
-                current_rank, current_flags = normalize_review_state(
-                    getattr(image, 'review_rank', 0),
-                    getattr(image, 'review_flags', 0),
-                )
-                if current_rank or current_flags:
-                    changed_states.append((image, 0, 0))
-
-            rel_paths = []
-            db = None
-            try:
+            model = self.image_list_model
+            db = getattr(model, '_db', None)
+            close_db = db is None
+            if db is None:
                 db = ImageIndexDB(directory_path)
+            try:
                 rel_paths = list(db.get_all_paths() or [])
-                db.clear_all_review_state(review_updated_at=review_updated_at)
             except Exception:
                 rel_paths = []
             finally:
-                if db is not None:
+                if close_db:
                     try:
                         db.close()
                     except Exception:
                         pass
-
-            for rel_path in rel_paths:
-                if rel_path in loaded_by_rel_path:
+            rel_paths = list(dict.fromkeys((*rel_paths, *loaded_by_rel_path.keys())))
+            snapshot = model._capture_paginated_review_snapshot(rel_paths)
+            for rel_path, image in loaded_by_rel_path.items():
+                state = snapshot.setdefault(rel_path, {})
+                state.update({
+                    'rating': float(getattr(image, 'rating', 0.0) or 0.0),
+                    'love': bool(getattr(image, 'love', False)),
+                    'bomb': bool(getattr(image, 'bomb', False)),
+                    'reaction_updated_at': getattr(image, 'reaction_updated_at', None),
+                    'review_rank': int(getattr(image, 'review_rank', 0) or 0),
+                    'review_flags': int(getattr(image, 'review_flags', 0) or 0),
+                    'review_updated_at': getattr(image, 'review_updated_at', None),
+                    'review_stickers': [vars(sticker) for sticker in image.review_stickers],
+                    'sticker_owned_flags': int(image.sticker_owned_flags or 0),
+                })
+            before_snapshot = {}
+            cleared_snapshot = {}
+            for rel_path, state in snapshot.items():
+                current_rank, current_flags = normalize_review_state(
+                    state.get('review_rank', 0),
+                    state.get('review_flags', 0),
+                )
+                removed_badge_ids = _removed_review_badge_ids(
+                    current_rank, current_flags, 0, 0
+                )
+                sticker_rows = state.get('review_stickers')
+                sticker_rows = sticker_rows if isinstance(sticker_rows, list) else []
+                remaining_stickers = [
+                    sticker for sticker in sticker_rows
+                    if not isinstance(sticker, dict)
+                    or sticker.get('badge_id') not in removed_badge_ids
+                ]
+                owned_flags = int(state.get('sticker_owned_flags', 0) or 0)
+                if not (
+                    current_rank or current_flags
+                    or remaining_stickers != sticker_rows
+                    or owned_flags
+                ):
                     continue
-                sidecar_path = preferred_taggui_sidecar_read_path(directory_path / rel_path)
-                if sidecar_path is None:
-                    continue
-                try:
-                    with sidecar_path.open(encoding='UTF-8') as source:
-                        meta = json.load(source)
-                except (OSError, json.JSONDecodeError, UnicodeDecodeError):
-                    continue
-                if not is_taggui_metadata_dict(meta):
-                    continue
-                meta['review_rank'] = 0
-                meta['review_flags'] = serialize_review_flags(0)
-                meta['review_updated_at'] = float(review_updated_at)
-                target_sidecar_path = taggui_sidecar_path(directory_path / rel_path)
-                try:
-                    with target_sidecar_path.open('w', encoding='UTF-8') as meta_file:
-                        json.dump(meta, meta_file)
-                except OSError:
-                    continue
-
-            self._commit_review_state_changes(
-                changed_states,
-                action_name=action_name,
-            )
+                before_snapshot[rel_path] = state
+                cleared_state = dict(state)
+                cleared_state.update({
+                    'review_rank': 0,
+                    'review_flags': 0,
+                    'review_updated_at': float(review_updated_at),
+                    'review_stickers': remaining_stickers,
+                    'sticker_owned_flags': 0,
+                })
+                cleared_snapshot[rel_path] = cleared_state
+            snapshot = before_snapshot
+            if snapshot:
+                model.add_paginated_review_snapshot_to_undo_stack(
+                    action_name,
+                    snapshot,
+                    should_ask_for_confirmation=False,
+                )
+                model._restore_paginated_review_snapshot(cleared_snapshot)
             self._refresh_review_badge_config()
             self._force_immediate_review_badge_repaint()
             return
@@ -4526,7 +4729,86 @@ class MainWindow(QMainWindow):
         except Exception:
             pass
 
-    def _refresh_review_ui_for_images(self, images: list[Image]):
+    @staticmethod
+    def _review_media_path_key(path) -> str:
+        try:
+            return str(Path(path).resolve()).casefold()
+        except (OSError, TypeError, ValueError):
+            return str(path or '').casefold()
+
+    @staticmethod
+    def _loaded_review_image_for_path(source_model, fallback_image):
+        if source_model is None or fallback_image is None:
+            return fallback_image
+        try:
+            row = source_model.get_loaded_row_for_path(fallback_image.path)
+            index = source_model.index(row, 0) if row >= 0 else QModelIndex()
+            image = index.data(Qt.ItemDataRole.UserRole) if index.isValid() else None
+            if image is not None and image.path == fallback_image.path:
+                return image
+        except (AttributeError, RuntimeError, TypeError, ValueError):
+            pass
+        return fallback_image
+
+    def _refresh_review_sticker_overlays(
+        self,
+        images: list[Image] | None = None,
+        *,
+        media_paths=None,
+        source_model=None,
+    ):
+        changed_by_path = None
+        if images is not None:
+            changed_by_path = {
+                self._review_media_path_key(image.path): image
+                for image in images
+                if image is not None and getattr(image, 'path', None) is not None
+            }
+        path_keys = (
+            {self._review_media_path_key(path) for path in (media_paths or ()) if path}
+            if media_paths is not None
+            else None
+        )
+        viewers = [getattr(self, 'image_viewer', None)]
+        viewers.extend(
+            getattr(window, 'viewer', None)
+            for window in list(getattr(self, '_floating_viewers', []))
+        )
+        for viewer in viewers:
+            try:
+                controls = getattr(viewer, 'sticker_controls', None)
+                image = getattr(viewer, 'current_media', None)
+                if controls is None or image is None:
+                    continue
+                proxy_model = getattr(viewer, 'proxy_image_list_model', None)
+                viewer_source_model = (
+                    proxy_model.sourceModel()
+                    if proxy_model is not None and hasattr(proxy_model, 'sourceModel')
+                    else None
+                )
+                if source_model is not None and viewer_source_model is not source_model:
+                    continue
+                path_key = self._review_media_path_key(getattr(image, 'path', None))
+                if changed_by_path is not None:
+                    image = changed_by_path.get(path_key)
+                    if image is None:
+                        continue
+                elif path_keys is not None:
+                    if path_key not in path_keys:
+                        continue
+                    image = self._loaded_review_image_for_path(source_model, image)
+                elif source_model is not None:
+                    image = self._loaded_review_image_for_path(source_model, image)
+                controls.refresh(image)
+            except (RuntimeError, AttributeError, TypeError, ValueError):
+                continue
+
+    def _refresh_review_ui_for_images(
+        self,
+        images: list[Image],
+        *,
+        source_model=None,
+    ):
         changed_paths = {
             str(getattr(image, 'path', '') or '')
             for image in images
@@ -4534,6 +4816,10 @@ class MainWindow(QMainWindow):
         }
         if not changed_paths:
             return
+        self._refresh_review_sticker_overlays(
+            images,
+            source_model=source_model,
+        )
         for window in list(getattr(self, '_floating_viewers', [])):
             try:
                 viewer = getattr(window, 'viewer', None)
@@ -4552,6 +4838,7 @@ class MainWindow(QMainWindow):
         self._sync_review_controls_from_context()
 
     def _refresh_review_badge_config(self):
+        self._refresh_review_sticker_overlays()
         widget = getattr(self, 'review_controls_widget', None)
         if widget is not None and hasattr(widget, 'refresh_badge_specs'):
             try:
@@ -10364,18 +10651,40 @@ class MainWindow(QMainWindow):
         target_context = self._rating_reaction_target_context()
         reaction_updated_at = time.time()
 
+        def _stickers_after_reaction_change(image):
+            sticker_ids_to_remove = set()
+            if love is False:
+                sticker_ids_to_remove.add('reaction_love')
+            if bomb is False:
+                sticker_ids_to_remove.add('reaction_bomb')
+            if not sticker_ids_to_remove:
+                return tuple(getattr(image, 'review_stickers', ()) or ())
+            return tuple(
+                sticker for sticker in (getattr(image, 'review_stickers', ()) or ())
+                if sticker.badge_id not in sticker_ids_to_remove
+            )
+
         def _virtual_reaction_updates(image):
             current_love = bool(getattr(image, 'love', False))
             current_bomb = bool(getattr(image, 'bomb', False))
             next_love = current_love if love is None else bool(love)
             next_bomb = current_bomb if bomb is None else bool(bomb)
-            if (current_love, current_bomb) == (next_love, next_bomb):
+            next_stickers = _stickers_after_reaction_change(image)
+            stickers_changed = next_stickers != tuple(
+                getattr(image, 'review_stickers', ()) or ()
+            )
+            if (current_love, current_bomb) == (next_love, next_bomb) and not stickers_changed:
                 return {}
-            return {
+            updates = {
                 'love': next_love,
                 'bomb': next_bomb,
-                'reaction_updated_at': reaction_updated_at,
             }
+            if (current_love, current_bomb) != (next_love, next_bomb):
+                updates['reaction_updated_at'] = reaction_updated_at
+            if stickers_changed:
+                updates['review_stickers'] = next_stickers
+                updates['stickers_dirty'] = True
+            return updates
 
         if self._apply_virtual_metadata_selection(
             target_context,
@@ -10396,12 +10705,22 @@ class MainWindow(QMainWindow):
         owner_list_view = target_context.get('list_view')
 
         changed_images = []
+        reaction_changed_images = []
+        sticker_changed_images = []
         for image in targets:
             current_love = bool(getattr(image, 'love', False))
             current_bomb = bool(getattr(image, 'bomb', False))
             next_love = current_love if love is None else bool(love)
             next_bomb = current_bomb if bomb is None else bool(bomb)
+            next_stickers = _stickers_after_reaction_change(image)
+            stickers_changed = next_stickers != tuple(
+                getattr(image, 'review_stickers', ()) or ()
+            )
             if current_love != next_love or current_bomb != next_bomb:
+                reaction_changed_images.append(image)
+            if stickers_changed:
+                sticker_changed_images.append(image)
+            if current_love != next_love or current_bomb != next_bomb or stickers_changed:
                 changed_images.append(image)
 
         if not changed_images:
@@ -10423,11 +10742,18 @@ class MainWindow(QMainWindow):
 
         reaction_updated_at = time.time()
         for image in changed_images:
+            current_love = bool(getattr(image, 'love', False))
+            current_bomb = bool(getattr(image, 'bomb', False))
             if love is not None:
                 image.love = bool(love)
             if bomb is not None:
                 image.bomb = bool(bomb)
-            image.reaction_updated_at = reaction_updated_at
+            if current_love != bool(image.love) or current_bomb != bool(image.bomb):
+                image.reaction_updated_at = reaction_updated_at
+            next_stickers = _stickers_after_reaction_change(image)
+            if next_stickers != tuple(getattr(image, 'review_stickers', ()) or ()):
+                image.review_stickers = next_stickers
+                image.stickers_dirty = True
             QTimer.singleShot(
                 0,
                 lambda img=image, model=owner_model: model.persist_reaction_state(img),
@@ -10439,6 +10765,15 @@ class MainWindow(QMainWindow):
             proxy_model=owner_proxy_model,
             list_view=owner_list_view,
         )
+        if sticker_changed_images:
+            self._refresh_review_sticker_overlays(
+                sticker_changed_images,
+                source_model=owner_model,
+            )
+        if not reaction_changed_images:
+            self._force_immediate_review_badge_repaint()
+            self._sync_rating_controls_from_context()
+            return
         feedback_kind = str(changed_kind or '').strip().lower()
         if feedback_kind == 'love':
             feedback_enabled = bool(love)
@@ -10457,7 +10792,7 @@ class MainWindow(QMainWindow):
                 self._arm_masonry_refresh_anchor()
             owner_proxy_model.set_filter(active_filter)
         self._refresh_reaction_sort_if_active(
-            changed_images,
+            reaction_changed_images,
             source_model=owner_model,
             sync_reactions=True,
         )

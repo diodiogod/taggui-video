@@ -32,6 +32,7 @@ TagGUI is a desktop app for image/video tagging, captioning, and dataset prepara
 - `docs/FLOATING_WALL_LAYOUT_NOTES.md`: Wall packing comparison, constraints, background reflow, and native verification commands.
 - `docs/PIPELINES_GUIDE.md`: Pipeline creation, step configuration, linking, execution, and import/export guide.
 - `docs/MARKINGS_GUIDE.md`: Manual and automatic marking workflows, class actions, and model safety notes.
+- `docs/STICKERS_GUIDE.md`: Positioned review stickers, cursor shortcuts, editing, badge synchronization, and sidecar storage.
 - `docs/QUICK_SORT_GUIDE.md`: Zero-setup keyboard sorting, named destination overrides, qualifier routing, file handling, and session controls.
 - `docs/SHORTCUTS.md`: Keyboard shortcuts, quick actions, and on-demand generation prompt reading.
 - `docs/TEXT_TRANSFORM_SPATIAL_REVIEW_GUIDE.md`: Configurable text swaps/replacements, manual spatial review, quick corrections, radial gestures, and settings.
@@ -83,6 +84,8 @@ TagGUI is a desktop app for image/video tagging, captioning, and dataset prepara
 - `image_list_masonry_completion_service.py`: Masonry completion handler (height reconciliation, anchoring, async UI apply).
 - `image_list_dock.py`: `ImageList` dock widget (toolbar/filter/status integration).
 - `image_viewer.py`: Main image/video preview viewer.
+- `review_sticker_controls.py`: Image-relative sticker placement, editing, display, and animation lifecycle.
+- `reaction_sticker_art.py`: Heart and bomb artwork and the transition into a saved sticker.
 - `floating_viewer_window.py`: Floating viewer host, manual move/resize, wall menus and review overlays.
 - `floating_viewer_wall_layout.py`: Original shortest-column masonry planner.
 - `floating_wall_packing.py`: Geometry-only masonry/MaxRects candidate search with exact size constraints.

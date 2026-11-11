@@ -5,6 +5,25 @@ All notable changes to TagGUI Video 1M are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.8.0] - 2026-11-11
+
+### Added
+
+- Add image stickers
+- Mark image details with review badges, hearts, and bombs using cursor shortcuts, toolbar drags, or the sticker menu.
+- Use sticker menus for individual or image-wide clearing.
+- Show saved stickers in floating viewers and Masonry Wall windows.
+- Save relative image positions and individual sizes in sidecar metadata.
+- Keep badge and reaction removal aligned with matching stickers, with fallback to a remaining numeric rank.
+- Customize sticker size and review appearance in Settings, and follow the new illustrated Stickers Guide.
+
+### Changed
+
+- Edit sticker positions, sizes, and types, with undo and redo for every change.
+
+### Fixed
+
+- Fix accidental exclude markings from sticker-menu clicks.
 ## [1.7.6] - 2026-11-10
 
 ### Added

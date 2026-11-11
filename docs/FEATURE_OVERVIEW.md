@@ -12,6 +12,7 @@ High-level capabilities of TagGUI Video 1M.
 - Main viewer hover controls for zoom, previous/next media, and fullscreen, with toolbar fallback when detached or when the main viewer is hidden
 - Floating/spawned viewers for multi-view workflows
 - Selection masonry review wall with persistent review badges
+- Positioned image stickers for review badges, hearts, and bombs, with cursor shortcuts and undo
 - Zero-setup keyboard sorting into folders with optional two-stage classification
 - Custom skin system for player controls
 
@@ -43,6 +44,7 @@ High-level capabilities of TagGUI Video 1M.
 - [Pipelines Guide](PIPELINES_GUIDE.md)
 - [Quick Sort Guide](QUICK_SORT_GUIDE.md)
 - [Markings Guide](MARKINGS_GUIDE.md)
+- [Stickers Guide](STICKERS_GUIDE.md)
 - [Shortcuts](SHORTCUTS.md)
 - [Compare Guide](COMPARE_GUIDE.md)
 - [Video Workflow Guide](VIDEO_WORKFLOW_GUIDE.md)

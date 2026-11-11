@@ -266,9 +266,17 @@ class ReactionToggleButton(QAbstractButton):
 
     def _update_tooltip(self):
         if self._kind == 'love':
-            self.setToolTip('Love this item (L)\nCtrl+click filters loved items')
+            self.setToolTip(
+                'Love this item (L)\n'
+                'Hover the main viewer and press L to place a heart sticker.\n'
+                'Ctrl+click filters loved items'
+            )
         else:
-            self.setToolTip('Bomb this item (B)\nCtrl+click filters bombed items')
+            self.setToolTip(
+                'Bomb this item (B)\n'
+                'Hover the main viewer and press B to place a bomb sticker.\n'
+                'Ctrl+click filters bombed items'
+            )
 
     def set_mixed_state(self, mixed: bool):
         mixed = bool(mixed)

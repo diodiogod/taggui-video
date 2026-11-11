@@ -127,6 +127,7 @@ DEFAULT_SETTINGS = {
     'review_badge_schema': '',
     'review_badge_text_color': '#FFFFFF',
     'review_badge_font_size': 9,
+    'review_sticker_size': 26,
     'review_badge_corner_radius': 5,
     'thumbnail_show_review_badges': True,
     'thumbnail_show_caption_status_badges': True,

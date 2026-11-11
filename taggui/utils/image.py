@@ -1,9 +1,16 @@
+from __future__ import annotations
+
 from enum import Enum
+from typing import TYPE_CHECKING
 from dataclasses import dataclass, field
 from pathlib import Path
 
 from PySide6.QtCore import QRect, QSize
 from PySide6.QtGui import QIcon, QImage
+
+
+if TYPE_CHECKING:
+    from utils.review_marks import ReviewSticker
 
 
 class ImageMarking(str, Enum):
@@ -85,6 +92,10 @@ class Image:
     file_type: str | None = None
     ctime: float | None = None
     mtime: float | None = None
+
+    review_stickers: tuple[ReviewSticker, ...] = ()
+    sticker_owned_flags: int = 0
+    stickers_dirty: bool = False
 
     def valid_dimensions(self) -> tuple[int, int] | None:
         """Return normalized dimensions only when both sides are usable."""

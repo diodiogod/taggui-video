@@ -1,0 +1,88 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1536" height="900" viewBox="0 0 1536 900">
+<rect width="1536" height="900" fill="#f6f8fc"/>
+<text x="44" y="70" font-family="Arial" font-size="40" font-weight="700" fill="#12233b" text-anchor="start">Place review stickers on image details</text>
+<text x="44" y="108" font-family="Arial" font-size="21" font-weight="400" fill="#52657d" text-anchor="start">Illustrated example: positions belong to the main image; the thumbnail keeps its fixed review badges.</text>
+<rect x="44" y="150" width="954" height="560" rx="16" fill="#ffffff" stroke="#d6e0ec" stroke-width="2"/>
+<rect x="1024" y="150" width="468" height="560" rx="16" fill="#ffffff" stroke="#d6e0ec" stroke-width="2"/>
+<text x="72" y="192" font-family="Arial" font-size="19" font-weight="700" fill="#52657d" text-anchor="start">MAIN VIEWER</text>
+<text x="1052" y="192" font-family="Arial" font-size="19" font-weight="700" fill="#52657d" text-anchor="start">IMAGE LIST / MASONRY THUMBNAIL</text>
+<rect x="72" y="218" width="898" height="390" rx="10" fill="#e9f1fa" stroke="#c4d3e5" stroke-width="2"/>
+<rect x="88.164" y="234.164" width="204.29500000000002" height="170.75400000000002" rx="4" fill="#ffffff"/>
+<path d="M116.76530000000001,258.06955999999997 V374.18228 H269.98655" fill="none" stroke="#a9bbd1" stroke-width="1.347"/>
+<path d="M116.76530000000001,357.10688 C161.7102,363.93704 176.01085,263.19218 208.69805000000002,281.97512 S245.47115000000002,353.6918 267.9436,304.17314" fill="none" stroke="#299ca8" stroke-width="2.694"/>
+<rect x="308.623" y="234.164" width="204.29500000000002" height="170.75400000000002" rx="4" fill="#ffffff"/>
+<path d="M337.22429999999997,258.06955999999997 V374.18228 H490.44555" fill="none" stroke="#a9bbd1" stroke-width="1.347"/>
+<path d="M337.22429999999997,357.10688 C382.1692,363.93704 396.46985,263.19218 429.15705,281.97512 S465.93015,353.6918 488.4026,304.17314" fill="none" stroke="#8861c1" stroke-width="2.694"/>
+<rect x="529.082" y="234.164" width="204.29500000000002" height="170.75400000000002" rx="4" fill="#ffffff"/>
+<path d="M557.6833,258.06955999999997 V374.18228 H710.90455" fill="none" stroke="#a9bbd1" stroke-width="1.347"/>
+<path d="M557.6833,357.10688 C602.6282,363.93704 616.92885,263.19218 649.61605,281.97512 S686.38915,353.6918 708.8616,304.17314" fill="none" stroke="#4386d4" stroke-width="2.694"/>
+<rect x="749.5409999999999" y="234.164" width="204.29500000000002" height="170.75400000000002" rx="4" fill="#ffffff"/>
+<path d="M778.1423,258.06955999999997 V374.18228 H931.3635499999999" fill="none" stroke="#a9bbd1" stroke-width="1.347"/>
+<path d="M778.1423,357.10688 C823.0871999999999,363.93704 837.38785,263.19218 870.0750499999999,281.97512 S906.8481499999999,353.6918 929.3206,304.17314" fill="none" stroke="#db776a" stroke-width="2.694"/>
+<rect x="88.164" y="421.082" width="204.29500000000002" height="170.75400000000002" rx="4" fill="#ffffff"/>
+<path d="M116.76530000000001,444.98756 V561.10028 H269.98655" fill="none" stroke="#a9bbd1" stroke-width="1.347"/>
+<path d="M116.76530000000001,544.0248799999999 C161.7102,550.85504 176.01085,450.11018 208.69805000000002,468.89312 S245.47115000000002,540.6098 267.9436,491.09114" fill="none" stroke="#299ca8" stroke-width="2.694"/>
+<rect x="308.623" y="421.082" width="204.29500000000002" height="170.75400000000002" rx="4" fill="#ffffff"/>
+<path d="M337.22429999999997,444.98756 V561.10028 H490.44555" fill="none" stroke="#a9bbd1" stroke-width="1.347"/>
+<path d="M337.22429999999997,544.0248799999999 C382.1692,550.85504 396.46985,450.11018 429.15705,468.89312 S465.93015,540.6098 488.4026,491.09114" fill="none" stroke="#8861c1" stroke-width="2.694"/>
+<rect x="529.082" y="421.082" width="204.29500000000002" height="170.75400000000002" rx="4" fill="#ffffff"/>
+<path d="M557.6833,444.98756 V561.10028 H710.90455" fill="none" stroke="#a9bbd1" stroke-width="1.347"/>
+<path d="M557.6833,544.0248799999999 C602.6282,550.85504 616.92885,450.11018 649.61605,468.89312 S686.38915,540.6098 708.8616,491.09114" fill="none" stroke="#4386d4" stroke-width="2.694"/>
+<rect x="749.5409999999999" y="421.082" width="204.29500000000002" height="170.75400000000002" rx="4" fill="#ffffff"/>
+<path d="M778.1423,444.98756 V561.10028 H931.3635499999999" fill="none" stroke="#a9bbd1" stroke-width="1.347"/>
+<path d="M778.1423,544.0248799999999 C823.0871999999999,550.85504 837.38785,450.11018 870.0750499999999,468.89312 S906.8481499999999,540.6098 929.3206,491.09114" fill="none" stroke="#db776a" stroke-width="2.694"/>
+<rect x="184.0" y="333.0" width="44" height="44" rx="8" fill="#12233b"/>
+<rect x="184.0" y="330.0" width="44" height="44" rx="8" fill="#ffc107" stroke="#ffffff" stroke-width="3"/>
+<text x="206" y="363.44" font-family="Arial" font-size="31.68" font-weight="700" fill="#ffffff" text-anchor="middle">1</text>
+<rect x="438.0" y="336.0" width="44" height="44" rx="8" fill="#12233b"/>
+<rect x="438.0" y="333.0" width="44" height="44" rx="8" fill="#22c55e" stroke="#ffffff" stroke-width="3"/>
+<text x="460" y="366.44" font-family="Arial" font-size="31.68" font-weight="700" fill="#ffffff" text-anchor="middle">3</text>
+<rect x="668.0" y="486.0" width="44" height="44" rx="8" fill="#12233b"/>
+<rect x="668.0" y="483.0" width="44" height="44" rx="8" fill="#22c55e" stroke="#ffffff" stroke-width="3"/>
+<text x="690" y="516.44" font-family="Arial" font-size="31.68" font-weight="700" fill="#ffffff" text-anchor="middle">3</text>
+<rect x="843.0" y="325.0" width="44" height="44" rx="8" fill="#12233b"/>
+<rect x="843.0" y="322.0" width="44" height="44" rx="8" fill="#f59e0b" stroke="#ffffff" stroke-width="3"/>
+<text x="865" y="355.44" font-family="Arial" font-size="31.68" font-weight="700" fill="#ffffff" text-anchor="middle">!</text>
+<path d="M714,520 l0,34 l9,-9 l8,15 l7,-4 l-8,-14 l12,-1 Z" fill="#ffffff" stroke="#12233b" stroke-width="2"/>
+<text x="74" y="653" font-family="Arial" font-size="23" font-weight="700" fill="#12233b" text-anchor="start">Place 1, then 3. Mark another detail with 3 or !.</text>
+<text x="74" y="685" font-family="Arial" font-size="21" font-weight="400" fill="#52657d" text-anchor="start">Each sticker keeps its own position on the image.</text>
+<rect x="1052" y="218" width="412" height="240" rx="10" fill="#e9f1fa" stroke="#c4d3e5" stroke-width="2"/>
+<rect x="1059.416" y="225.416" width="93.73" height="108.876" rx="4" fill="#ffffff"/>
+<path d="M1072.5382,240.65864 V314.69432 H1142.8356999999999" fill="none" stroke="#a9bbd1" stroke-width="1"/>
+<path d="M1072.5382,303.80672 C1093.1588,308.16176 1099.7199,243.92492 1114.7167,255.90127999999999 S1131.5881,301.62919999999997 1141.8984,270.05516" fill="none" stroke="#299ca8" stroke-width="1.5"/>
+<rect x="1160.562" y="225.416" width="93.73" height="108.876" rx="4" fill="#ffffff"/>
+<path d="M1173.6842,240.65864 V314.69432 H1243.9816999999998" fill="none" stroke="#a9bbd1" stroke-width="1"/>
+<path d="M1173.6842,303.80672 C1194.3048,308.16176 1200.8658999999998,243.92492 1215.8627,255.90127999999999 S1232.7341,301.62919999999997 1243.0444,270.05516" fill="none" stroke="#8861c1" stroke-width="1.5"/>
+<rect x="1261.7079999999999" y="225.416" width="93.73" height="108.876" rx="4" fill="#ffffff"/>
+<path d="M1274.8301999999999,240.65864 V314.69432 H1345.1276999999998" fill="none" stroke="#a9bbd1" stroke-width="1"/>
+<path d="M1274.8301999999999,303.80672 C1295.4507999999998,308.16176 1302.0119,243.92492 1317.0086999999999,255.90127999999999 S1333.8800999999999,301.62919999999997 1344.1904,270.05516" fill="none" stroke="#4386d4" stroke-width="1.5"/>
+<rect x="1362.8539999999998" y="225.416" width="93.73" height="108.876" rx="4" fill="#ffffff"/>
+<path d="M1375.9761999999998,240.65864 V314.69432 H1446.2736999999997" fill="none" stroke="#a9bbd1" stroke-width="1"/>
+<path d="M1375.9761999999998,303.80672 C1396.5967999999998,308.16176 1403.1578999999997,243.92492 1418.1546999999998,255.90127999999999 S1435.0260999999998,301.62919999999997 1445.3364,270.05516" fill="none" stroke="#db776a" stroke-width="1.5"/>
+<rect x="1059.416" y="341.70799999999997" width="93.73" height="108.876" rx="4" fill="#ffffff"/>
+<path d="M1072.5382,356.95063999999996 V430.98632 H1142.8356999999999" fill="none" stroke="#a9bbd1" stroke-width="1"/>
+<path d="M1072.5382,420.09871999999996 C1093.1588,424.45376 1099.7199,360.21691999999996 1114.7167,372.19327999999996 S1131.5881,417.9212 1141.8984,386.34716" fill="none" stroke="#299ca8" stroke-width="1.5"/>
+<rect x="1160.562" y="341.70799999999997" width="93.73" height="108.876" rx="4" fill="#ffffff"/>
+<path d="M1173.6842,356.95063999999996 V430.98632 H1243.9816999999998" fill="none" stroke="#a9bbd1" stroke-width="1"/>
+<path d="M1173.6842,420.09871999999996 C1194.3048,424.45376 1200.8658999999998,360.21691999999996 1215.8627,372.19327999999996 S1232.7341,417.9212 1243.0444,386.34716" fill="none" stroke="#8861c1" stroke-width="1.5"/>
+<rect x="1261.7079999999999" y="341.70799999999997" width="93.73" height="108.876" rx="4" fill="#ffffff"/>
+<path d="M1274.8301999999999,356.95063999999996 V430.98632 H1345.1276999999998" fill="none" stroke="#a9bbd1" stroke-width="1"/>
+<path d="M1274.8301999999999,420.09871999999996 C1295.4507999999998,424.45376 1302.0119,360.21691999999996 1317.0086999999999,372.19327999999996 S1333.8800999999999,417.9212 1344.1904,386.34716" fill="none" stroke="#4386d4" stroke-width="1.5"/>
+<rect x="1362.8539999999998" y="341.70799999999997" width="93.73" height="108.876" rx="4" fill="#ffffff"/>
+<path d="M1375.9761999999998,356.95063999999996 V430.98632 H1446.2736999999997" fill="none" stroke="#a9bbd1" stroke-width="1"/>
+<path d="M1375.9761999999998,420.09871999999996 C1396.5967999999998,424.45376 1403.1578999999997,360.21691999999996 1418.1546999999998,372.19327999999996 S1435.0260999999998,417.9212 1445.3364,386.34716" fill="none" stroke="#db776a" stroke-width="1.5"/>
+<rect x="1063.0" y="230.0" width="36" height="36" rx="8" fill="#12233b"/>
+<rect x="1063.0" y="227.0" width="36" height="36" rx="8" fill="#22c55e" stroke="#ffffff" stroke-width="3"/>
+<text x="1081" y="254.36" font-family="Arial" font-size="25.919999999999998" font-weight="700" fill="#ffffff" text-anchor="middle">3</text>
+<rect x="1107.0" y="230.0" width="36" height="36" rx="8" fill="#12233b"/>
+<rect x="1107.0" y="227.0" width="36" height="36" rx="8" fill="#f59e0b" stroke="#ffffff" stroke-width="3"/>
+<text x="1125" y="254.36" font-family="Arial" font-size="25.919999999999998" font-weight="700" fill="#ffffff" text-anchor="middle">!</text>
+<text x="1054" y="496" font-family="Arial" font-size="24" font-weight="700" fill="#12233b" text-anchor="start">plot.png</text>
+<text x="1054" y="539" font-family="Arial" font-size="22" font-weight="400" fill="#12233b" text-anchor="start">Current numeric rank: 3</text>
+<text x="1054" y="575" font-family="Arial" font-size="22" font-weight="400" fill="#12233b" text-anchor="start">Warning is also enabled.</text>
+<text x="1054" y="642" font-family="Arial" font-size="20" font-weight="400" fill="#52657d" text-anchor="start">One fixed badge per active type.</text>
+<text x="1054" y="678" font-family="Arial" font-size="20" font-weight="400" fill="#52657d" text-anchor="start">No positioned thumbnail stickers.</text>
+<rect x="44" y="742" width="1448" height="112" rx="14" fill="#e4edf8"/>
+<text x="72" y="782" font-family="Arial" font-size="25" font-weight="700" fill="#12233b" text-anchor="start">Clear a badge to remove its matching stickers.</text>
+<text x="72" y="820" font-family="Arial" font-size="22" font-weight="400" fill="#12233b" text-anchor="start">Turn rank 3 off outside the main image: the 3 stickers disappear, and the remaining 1 supplies rank 1.</text>
+</svg>

@@ -13,7 +13,7 @@ LEGACY_JSON_SIDECAR_SUFFIX = ".json"
 
 _TAGGUI_METADATA_FIELDS = frozenset({
     'crop', 'markings', 'rating', 'love', 'bomb', 'reaction_updated_at',
-    'review_rank', 'review_flags', 'review_updated_at', 'caption_workspace',
+    'review_stickers', 'review_rank', 'review_flags', 'review_updated_at', 'caption_workspace',
     'loop_start_frame', 'loop_end_frame', 'viewer_loop_markers',
     'floating_last_loop_start_frame', 'floating_last_loop_end_frame',
 })

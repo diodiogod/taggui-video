@@ -18,6 +18,34 @@ DEFAULT_REVIEW_BADGE_FONT_SIZE = 9
 DEFAULT_REVIEW_BADGE_CORNER_RADIUS = 5
 
 
+@dataclass(frozen=True)
+class ReviewSticker:
+    id: str
+    badge_id: str
+    x: float
+    y: float
+    size_offset: int = 0
+
+    @classmethod
+    def parse_many(cls, rows):
+        stickers = []
+        seen = set()
+        for row in rows if isinstance(rows, list) else ():
+            if not isinstance(row, dict):
+                continue
+            key, badge = row.get('id'), row.get('badge_id')
+            x, y = row.get('x'), row.get('y')
+            if (isinstance(key, str) and key and key not in seen
+                    and isinstance(badge, str) and badge
+                    and isinstance(x, (float, int)) and 0 <= x <= 1
+                    and isinstance(y, (float, int)) and 0 <= y <= 1):
+                offset = row.get('size_offset', 0)
+                offset = max(-84, min(84, offset)) if type(offset) is int else 0
+                stickers.append(cls(key, badge, x, y, offset))
+                seen.add(key)
+        return tuple(stickers)
+
+
 class ReviewFlag(IntFlag):
     NONE = 0
     IDEA = 1 << 0
@@ -74,6 +102,7 @@ class ReviewBadgeSpec:
     rank: int | None = None
     flag_name: str | None = None
     flag: ReviewFlag = ReviewFlag.NONE
+    reaction_name: str | None = None
 
 
 _DEFAULT_BADGE_ROWS: tuple[dict, ...] = (
@@ -161,6 +190,25 @@ _DEFAULT_BADGE_ROWS: tuple[dict, ...] = (
         'title': '',
         'color': '#6366F1',
         'shortcuts': ('/', 'Shift+/'),
+    },
+)
+
+_REACTION_STICKER_ROWS: tuple[dict, ...] = (
+    {
+        'badge_id': 'reaction_love',
+        'kind': 'reaction',
+        'reaction_name': 'love',
+        'label': '♥',
+        'title': 'Love heart',
+        'color': '#FF6E8A',
+    },
+    {
+        'badge_id': 'reaction_bomb',
+        'kind': 'reaction',
+        'reaction_name': 'bomb',
+        'label': '●',
+        'title': 'Bomb',
+        'color': '#FFAA5C',
     },
 )
 
@@ -334,6 +382,7 @@ def _build_badge_spec(default_row: dict, override_row: dict | None = None) -> Re
         rank=default_row.get('rank'),
         flag_name=default_row.get('flag_name'),
         flag=default_row.get('flag', ReviewFlag.NONE),
+        reaction_name=default_row.get('reaction_name'),
     )
 
 
@@ -384,6 +433,14 @@ def get_review_badge_specs() -> tuple[ReviewBadgeSpec, ...]:
     return _review_badge_specs_cache
 
 
+def get_review_sticker_specs() -> tuple[ReviewBadgeSpec, ...]:
+    """Return review badges plus the reaction stickers available on images."""
+    return (
+        *get_review_badge_specs(),
+        *(_build_badge_spec(row) for row in _REACTION_STICKER_ROWS),
+    )
+
+
 def get_review_badge_spec_for_id(badge_id: str) -> ReviewBadgeSpec | None:
     target = str(badge_id or '').strip()
     if not target:
@@ -392,6 +449,25 @@ def get_review_badge_spec_for_id(badge_id: str) -> ReviewBadgeSpec | None:
         if spec.badge_id == target:
             return spec
     return None
+
+
+def get_review_sticker_spec_for_id(badge_id: str) -> ReviewBadgeSpec | None:
+    target = str(badge_id or '').strip()
+    if not target:
+        return None
+    return next(
+        (spec for spec in get_review_sticker_specs() if spec.badge_id == target),
+        None,
+    )
+
+
+def get_review_sticker_spec_for_reaction(reaction_name: str) -> ReviewBadgeSpec | None:
+    target = str(reaction_name or '').strip().lower()
+    return next(
+        (spec for spec in get_review_sticker_specs()
+         if spec.kind == 'reaction' and spec.reaction_name == target),
+        None,
+    )
 
 
 def get_review_badge_spec_for_rank(rank: int) -> ReviewBadgeSpec | None:

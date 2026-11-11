@@ -56,6 +56,15 @@ existing floating windows, use **View → Arrange as Masonry Wall**.
 See the [Masonry Review Wall Guide](MASONRY_REVIEW_WALL_GUIDE.md) for layout settings,
 ghost previews, resets, and review badges.
 
+## Stickers on Still Images
+
+Floating viewers and Masonry Wall windows display stickers saved for their
+current image. The stickers keep their image positions while you pan or zoom.
+
+Place and edit stickers in the main viewer. Right-clicking or dragging inside a
+floating viewer keeps its normal window and media controls. See the
+[Stickers Guide](STICKERS_GUIDE.md) for placement shortcuts, resizing, and undo.
+
 ## Hold Mode
 
 - `H` toggles hold mode for existing spawned viewers.
@@ -128,6 +137,7 @@ How to exit compare mode:
 
 - [Compare Guide](COMPARE_GUIDE.md)
 - [Masonry Review Wall Guide](MASONRY_REVIEW_WALL_GUIDE.md)
+- [Stickers Guide](STICKERS_GUIDE.md)
 - [Video Workflow Guide](VIDEO_WORKFLOW_GUIDE.md)
 - [Video Surface Controls Guide](VIDEO_SURFACE_CONTROLS_GUIDE.md)
 - [Shortcuts](SHORTCUTS.md)

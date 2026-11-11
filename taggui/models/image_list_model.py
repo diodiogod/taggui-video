@@ -47,6 +47,7 @@ from utils.image_index_db import (
 )
 from utils.jxlutil import get_jxl_size
 from utils.review_marks import (
+    ReviewSticker,
     normalize_review_state,
     parse_review_flag_token,
     serialize_review_flags,
@@ -1763,7 +1764,7 @@ class HistoryItem:
     tags: list[dict[str, list[str] | QRect | None | list[Marking]]]
     should_ask_for_confirmation: bool
     paginated_snapshot: dict[str, list[str]] | None = None
-    paginated_review_snapshot: dict[str, dict[str, int | float | None]] | None = None
+    paginated_review_snapshot: dict[str, dict[str, Any]] | None = None
     image_snapshots: list[dict[str, Any]] | None = None
     ideogram_sidecar_snapshots: list[dict[str, Any]] | None = None
     created_at_ns: int = field(default_factory=time.monotonic_ns)
@@ -1851,6 +1852,9 @@ class ImageListModel(QAbstractListModel):
         """Apply supported image/video metadata from a parsed sidecar JSON dict."""
         if not isinstance(meta, dict) or meta.get('version') != 1:
             return
+        image.review_stickers = ReviewSticker.parse_many(meta.get('review_stickers'))
+        owned_flags = meta.get('sticker_owned_flags', 0)
+        image.sticker_owned_flags = owned_flags if isinstance(owned_flags, int) else 0
         crop = meta.get('crop')
         if isinstance(crop, list) and len(crop) == 4:
             try:
@@ -8722,6 +8726,8 @@ class ImageListModel(QAbstractListModel):
             'review_rank': int(getattr(image, 'review_rank', 0) or 0),
             'review_flags': int(getattr(image, 'review_flags', 0) or 0),
             'review_updated_at': getattr(image, 'review_updated_at', None),
+            'review_stickers': [vars(sticker) for sticker in image.review_stickers],
+            'sticker_owned_flags': int(image.sticker_owned_flags or 0),
         })
 
     def commit_streaming_paginated_review_history(self):
@@ -8729,11 +8735,27 @@ class ImageListModel(QAbstractListModel):
         self._streaming_paginated_review_history = None
         if not history or not history['snapshot']:
             return
-        self.undo_stack.append(HistoryItem(
+        self.add_paginated_review_snapshot_to_undo_stack(
             history['action_name'],
+            history['snapshot'],
+            should_ask_for_confirmation=history['should_ask_for_confirmation'],
+        )
+
+    def add_paginated_review_snapshot_to_undo_stack(
+        self,
+        action_name: str,
+        snapshot: dict[str, dict[str, Any]],
+        *,
+        should_ask_for_confirmation: bool,
+    ):
+        """Add a path-backed review snapshot without loading thumbnail pages."""
+        if not snapshot:
+            return
+        self.undo_stack.append(HistoryItem(
+            str(action_name),
             [],
-            history['should_ask_for_confirmation'],
-            paginated_review_snapshot=dict(history['snapshot']),
+            bool(should_ask_for_confirmation),
+            paginated_review_snapshot=dict(snapshot),
         ))
         self.redo_stack.clear()
         self.update_undo_and_redo_actions_requested.emit()
@@ -8749,6 +8771,8 @@ class ImageListModel(QAbstractListModel):
             'review_flags': int(getattr(image, 'review_flags', 0) or 0),
             'review_updated_at': getattr(image, 'review_updated_at', None),
             'crop': QRect(image.crop) if image.crop is not None else None,
+            'review_stickers': image.review_stickers,
+            'sticker_owned_flags': image.sticker_owned_flags,
             'target_dimension': QSize(image.target_dimension)
             if image.target_dimension is not None else None,
             'markings': image.markings.copy(),
@@ -8943,6 +8967,12 @@ class ImageListModel(QAbstractListModel):
         image.review_rank = int(state.get('review_rank', 0) or 0)
         image.review_flags = int(state.get('review_flags', 0) or 0)
         image.review_updated_at = state.get('review_updated_at')
+        if ('review_stickers' in state and
+                (image.review_stickers != state['review_stickers'] or
+                 image.sticker_owned_flags != state['sticker_owned_flags'])):
+            image.stickers_dirty = True
+            image.review_stickers = state['review_stickers']
+            image.sticker_owned_flags = state['sticker_owned_flags']
         image.crop = state['crop']
         image.target_dimension = state.get('target_dimension')
         image.markings = state['markings']
@@ -9075,38 +9105,37 @@ class ImageListModel(QAbstractListModel):
 
         self._reload_loaded_pages_after_paginated_tag_change()
 
-    def _capture_paginated_review_snapshot(self, relative_paths) -> dict[str, dict]:
-        if not self._db:
+    def _capture_paginated_review_snapshot(self, relative_paths) -> dict[str, dict[str, Any]]:
+        if not self._directory_path:
             return {}
-        return self._db.get_review_states_for_paths(relative_paths)
-
-    def _restore_paginated_review_snapshot(self, snapshot: dict[str, dict]):
-        """Restore review state without materializing every selected thumbnail."""
-        if not self._db or not self._directory_path:
-            return
-        for rel_path, state in snapshot.items():
-            media_path = self._directory_path / rel_path
-            rank, flags = normalize_review_state(
-                state.get('review_rank', 0),
-                state.get('review_flags', 0),
+        db = self._db
+        close_db = db is None
+        if db is None:
+            db = ImageIndexDB(self._directory_path)
+        paths = [str(path) for path in relative_paths if str(path)]
+        try:
+            snapshot = db.get_review_states_for_paths(paths)
+        finally:
+            if close_db:
+                try:
+                    db.close()
+                except Exception:
+                    pass
+        for rel_path in paths:
+            has_db_state = rel_path in snapshot
+            state = snapshot.setdefault(rel_path, {
+                'rating': 0.0,
+                'love': False,
+                'bomb': False,
+                'reaction_updated_at': None,
+                'review_rank': 0,
+                'review_flags': 0,
+                'review_updated_at': None,
+            })
+            read_path = preferred_taggui_sidecar_read_path(
+                self._directory_path / rel_path
             )
-            updated_at = state.get('review_updated_at')
-            image_id = self._db.get_image_id(rel_path)
-            if image_id:
-                self._db.set_rating(
-                    image_id,
-                    float(state.get('rating', 0.0) or 0.0),
-                    reaction_updated_at=state.get('reaction_updated_at'),
-                )
-                self._db.set_reactions(
-                    image_id,
-                    bool(state.get('love', False)),
-                    bool(state.get('bomb', False)),
-                    reaction_updated_at=state.get('reaction_updated_at'),
-                )
-                self._db.set_review_state(image_id, rank, flags, updated_at)
-            read_path = preferred_taggui_sidecar_read_path(media_path)
-            meta = {'version': 1}
+            meta = None
             if read_path is not None:
                 try:
                     with read_path.open(encoding='UTF-8') as source:
@@ -9115,27 +9144,140 @@ class ImageListModel(QAbstractListModel):
                         meta = loaded
                 except (OSError, UnicodeError, json.JSONDecodeError):
                     pass
-            meta['review_rank'] = int(rank)
-            meta['review_flags'] = serialize_review_flags(flags)
-            meta['rating'] = float(state.get('rating', 0.0) or 0.0)
-            meta['love'] = bool(state.get('love', False))
-            meta['bomb'] = bool(state.get('bomb', False))
-            reaction_updated_at = state.get('reaction_updated_at')
-            if isinstance(reaction_updated_at, (int, float)):
-                meta['reaction_updated_at'] = float(reaction_updated_at)
-            else:
-                meta.pop('reaction_updated_at', None)
-            if isinstance(updated_at, (int, float)):
-                meta['review_updated_at'] = float(updated_at)
-            else:
-                meta.pop('review_updated_at', None)
+            sticker_rows = meta.get('review_stickers') if isinstance(meta, dict) else None
+            state['review_stickers'] = sticker_rows if isinstance(sticker_rows, list) else []
+            owned_flags = meta.get('sticker_owned_flags', 0) if isinstance(meta, dict) else 0
+            state['sticker_owned_flags'] = int(owned_flags) if type(owned_flags) is int else 0
+            if isinstance(meta, dict) and not has_db_state:
+                sidecar_reactions = extract_sidecar_reaction_state(meta) or {}
+                sidecar_review = extract_sidecar_review_state(meta) or {}
+                state.update({
+                    'rating': float(sidecar_reactions.get('rating', 0.0) or 0.0),
+                    'love': bool(sidecar_reactions.get('love', False)),
+                    'bomb': bool(sidecar_reactions.get('bomb', False)),
+                    'reaction_updated_at': sidecar_reactions.get('reaction_updated_at'),
+                    'review_rank': int(sidecar_review.get('review_rank', 0) or 0),
+                    'review_flags': int(sidecar_review.get('review_flags', 0) or 0),
+                    'review_updated_at': sidecar_review.get('review_updated_at'),
+                })
+        return snapshot
+
+    def _restore_paginated_review_snapshot(self, snapshot: dict[str, dict[str, Any]]):
+        """Restore review state without materializing every selected thumbnail."""
+        if not self._directory_path:
+            return
+        db = self._db
+        close_db = db is None
+        if db is None:
+            db = ImageIndexDB(self._directory_path)
+        try:
+            for rel_path, state in snapshot.items():
+                media_path = self._directory_path / rel_path
+                rank, flags = normalize_review_state(
+                    state.get('review_rank', 0),
+                    state.get('review_flags', 0),
+                )
+                updated_at = state.get('review_updated_at')
+                image_id = db.get_image_id(rel_path)
+                if image_id:
+                    db.set_rating(
+                        image_id,
+                        float(state.get('rating', 0.0) or 0.0),
+                        reaction_updated_at=state.get('reaction_updated_at'),
+                    )
+                    db.set_reactions(
+                        image_id,
+                        bool(state.get('love', False)),
+                        bool(state.get('bomb', False)),
+                        reaction_updated_at=state.get('reaction_updated_at'),
+                    )
+                    db.set_review_state(image_id, rank, flags, updated_at)
+                read_path = preferred_taggui_sidecar_read_path(media_path)
+                meta = {'version': 1}
+                if read_path is not None:
+                    try:
+                        with read_path.open(encoding='UTF-8') as source:
+                            loaded = json.load(source)
+                        if is_taggui_metadata_dict(loaded):
+                            meta = loaded
+                    except (OSError, UnicodeError, json.JSONDecodeError):
+                        pass
+                meta['review_rank'] = int(rank)
+                meta['review_flags'] = serialize_review_flags(flags)
+                meta['rating'] = float(state.get('rating', 0.0) or 0.0)
+                meta['love'] = bool(state.get('love', False))
+                meta['bomb'] = bool(state.get('bomb', False))
+                reaction_updated_at = state.get('reaction_updated_at')
+                if isinstance(reaction_updated_at, (int, float)):
+                    meta['reaction_updated_at'] = float(reaction_updated_at)
+                else:
+                    meta.pop('reaction_updated_at', None)
+                if isinstance(updated_at, (int, float)):
+                    meta['review_updated_at'] = float(updated_at)
+                else:
+                    meta.pop('review_updated_at', None)
+                if 'review_stickers' in state:
+                    sticker_rows = state.get('review_stickers')
+                    if isinstance(sticker_rows, list) and sticker_rows:
+                        meta['review_stickers'] = sticker_rows
+                        owned_flags = state.get('sticker_owned_flags', 0)
+                        meta['sticker_owned_flags'] = (
+                            int(owned_flags) if type(owned_flags) is int else 0
+                        )
+                    else:
+                        meta.pop('review_stickers', None)
+                        meta.pop('sticker_owned_flags', None)
+                try:
+                    target = taggui_sidecar_path(media_path)
+                    with target.open('w', encoding='UTF-8') as destination:
+                        json.dump(meta, destination)
+                except OSError as exc:
+                    print(f'Error restoring review state for {rel_path}: {exc}')
+        finally:
+            if close_db:
+                try:
+                    db.close()
+                except Exception:
+                    pass
+
+        if self._paginated_mode:
+            self._reload_loaded_pages_after_paginated_tag_change()
+            self.image_history_restored.emit([
+                str(self._directory_path / rel_path)
+                for rel_path in snapshot
+            ])
+            return
+
+        changed_indices = []
+        restored_paths = []
+        for index, image in enumerate(self.images):
             try:
-                target = taggui_sidecar_path(media_path)
-                with target.open('w', encoding='UTF-8') as destination:
-                    json.dump(meta, destination)
-            except OSError as exc:
-                print(f'Error restoring review state for {rel_path}: {exc}')
-        self._reload_loaded_pages_after_paginated_tag_change()
+                rel_path = str(image.path.relative_to(self._directory_path))
+            except (AttributeError, ValueError):
+                continue
+            state = snapshot.get(rel_path)
+            if state is None:
+                continue
+            image.review_rank, image.review_flags = normalize_review_state(
+                state.get('review_rank', 0),
+                state.get('review_flags', 0),
+            )
+            image.review_updated_at = state.get('review_updated_at')
+            image.review_stickers = ReviewSticker.parse_many(
+                state.get('review_stickers')
+            )
+            owned_flags = state.get('sticker_owned_flags', 0)
+            image.sticker_owned_flags = int(owned_flags) if type(owned_flags) is int else 0
+            image.stickers_dirty = False
+            changed_indices.append(index)
+            restored_paths.append(str(image.path))
+        if changed_indices:
+            self.dataChanged.emit(
+                self.index(min(changed_indices)),
+                self.index(max(changed_indices)),
+            )
+        if restored_paths:
+            self.image_history_restored.emit(restored_paths)
 
     def _normalize_tags(self, tags: list[str]) -> list[str]:
         """Trim tag whitespace and drop empty entries."""
@@ -9457,6 +9599,13 @@ class ImageListModel(QAbstractListModel):
             'review_rank': int(review_rank),
             'review_flags': serialize_review_flags(review_flags),
         })
+        if image.stickers_dirty:
+            if image.review_stickers:
+                meta['review_stickers'] = [vars(sticker) for sticker in image.review_stickers]
+                meta['sticker_owned_flags'] = image.sticker_owned_flags
+            else:
+                meta.pop('review_stickers', None)
+                meta.pop('sticker_owned_flags', None)
         reaction_updated_at = getattr(image, 'reaction_updated_at', None)
         if isinstance(reaction_updated_at, (int, float)):
             meta['reaction_updated_at'] = float(reaction_updated_at)
@@ -9485,6 +9634,7 @@ class ImageListModel(QAbstractListModel):
             try:
                 with sidecar_path.open('w', encoding='UTF-8') as meta_file:
                     json.dump(meta, meta_file)
+                image.stickers_dirty = False
                 with self._sidecar_meta_cache_lock:
                     self._sidecar_meta_cache.pop(str(sidecar_path), None)
             except OSError:
@@ -9558,7 +9708,7 @@ class ImageListModel(QAbstractListModel):
             self._restore_paginated_tag_snapshot(history_item.paginated_snapshot)
             self.update_undo_and_redo_actions_requested.emit()
             return
-        if self._paginated_mode and history_item.paginated_review_snapshot is not None:
+        if history_item.paginated_review_snapshot is not None:
             destination_stack.append(HistoryItem(
                 history_item.action_name,
                 [],

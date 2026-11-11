@@ -2,7 +2,7 @@
 
 from PySide6.QtCore import QSize, Qt, QRect, QTimer
 from PySide6.QtGui import QAction, QActionGroup, QCursor, QIcon, QMouseEvent, QPainter
-from PySide6.QtWidgets import QFrame, QGraphicsView, QGraphicsLineItem, QMenu, QWidget
+from PySide6.QtWidgets import QApplication, QFrame, QGraphicsView, QGraphicsLineItem, QMenu, QWidget
 from PySide6.QtOpenGLWidgets import QOpenGLWidget
 
 from utils.image import ImageMarking
@@ -57,6 +57,7 @@ class ImageGraphicsView(QGraphicsView):
         self.viewport().setMouseTracking(True)
         self.last_pos = None
         self._space_pan_active = False
+        self._pending_exclude = None
         self._manual_pan_active = False
         self._manual_pan_last_global_pos = None
         self._temporarily_raised_ideogram_item = None
@@ -408,6 +409,7 @@ class ImageGraphicsView(QGraphicsView):
     def clear_scene(self):
         """Use this and not scene().clear() due to resource management."""
         self.restore_transient_ideogram_interaction_state()
+        self._pending_exclude = None
         self.insertion_mode = False
         self.horizontal_line = None
         self.vertical_line = None
@@ -509,6 +511,17 @@ class ImageGraphicsView(QGraphicsView):
             event.accept()
             return
 
+        alt_drag = (event.modifiers() & (Qt.AltModifier | Qt.GroupSwitchModifier)
+                    and self.image_viewer.marking_to_add in (ImageMarking.NONE, ImageMarking.EXCLUDE))
+        if (event.button() == Qt.LeftButton and self._interactive_region_at(scene_pos) is None
+                and (alt_drag or (self.insertion_mode and self.image_viewer.marking_to_add == ImageMarking.EXCLUDE))):
+            start = scene_pos.toPoint()
+            if event.modifiers() & Qt.ShiftModifier:
+                start = grid.snap(start).toPoint()
+            self._pending_exclude = (event.position().toPoint(), start, self.image_viewer.current_media)
+            event.accept()
+            return
+
         if self._should_start_manual_pan(event):
             self._begin_manual_pan(event, clear_selection=True)
             return
@@ -589,6 +602,26 @@ class ImageGraphicsView(QGraphicsView):
         super().mousePressEvent(event)
 
     def mouseMoveEvent(self, event: QMouseEvent):
+        if self._pending_exclude is not None:
+            press, start, owner = self._pending_exclude
+            if not event.buttons() & Qt.LeftButton:
+                self._pending_exclude = None
+            elif (event.position().toPoint() - press).manhattanLength() < QApplication.startDragDistance():
+                event.accept()
+                return
+            else:
+                self._pending_exclude = None
+                _, model, image = self.image_viewer.get_live_image_context()
+                if image is owner and image is not None:
+                    model.add_image_to_undo_stack(image, 'Add exclude from mask', False)
+                    self.last_pos = start
+                    self.image_viewer.add_rectangle(QRect(start, QSize(0, 0)), ImageMarking.EXCLUDE,
+                                                    interactive=True)
+                    self.set_insertion_mode(ImageMarking.NONE)
+                    self.setDragMode(QGraphicsView.NoDrag)
+                    super().mouseMoveEvent(event)
+                event.accept()
+                return
         if self._forced_ideogram_resize_item is not None:
             self._forced_ideogram_resize_item.forced_drag_to_scene_pos(
                 self.mapToScene(event.pos())
@@ -743,6 +776,10 @@ class ImageGraphicsView(QGraphicsView):
         super().mouseDoubleClickEvent(event)
 
     def mouseReleaseEvent(self, event: QMouseEvent):
+        if self._pending_exclude is not None and event.button() == Qt.LeftButton:
+            self._pending_exclude = None
+            event.accept()
+            return
         if self._forced_ideogram_resize_item is not None:
             self._forced_ideogram_resize_item.finish_forced_resize()
             self._forced_ideogram_resize_item = None

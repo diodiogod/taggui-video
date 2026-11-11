@@ -1243,6 +1243,13 @@ class SettingsDialog(QDialog):
         self.review_badge_corner_radius_combo.addItems([str(size) for size in range(2, 15)])
         self.review_badge_corner_radius_combo.currentTextChanged.connect(self._save_review_badge_appearance_settings)
         appearance_grid.addWidget(self.review_badge_corner_radius_combo, 0, 5, Qt.AlignmentFlag.AlignLeft)
+        appearance_grid.addWidget(QLabel('Viewer sticker size'), 1, 0)
+        self.review_sticker_size_slider = SettingsSlider('review_sticker_size', 12, 96)
+        size_label = QLabel(f'{self.review_sticker_size_slider.value()} px')
+        self.review_sticker_size_slider.valueChanged.connect(
+            lambda size: size_label.setText(f'{size} px'))
+        appearance_grid.addWidget(self.review_sticker_size_slider, 1, 1, 1, 4)
+        appearance_grid.addWidget(size_label, 1, 5)
         layout.addLayout(appearance_grid)
 
         header = QGridLayout()
@@ -1381,6 +1388,7 @@ class SettingsDialog(QDialog):
             self.review_badge_text_color_button,
             self._review_badge_text_color,
         )
+        self.review_sticker_size_slider.setValue(DEFAULT_SETTINGS['review_sticker_size'])
         self.review_badge_font_size_combo.setCurrentText('9')
         self.review_badge_corner_radius_combo.setCurrentText('5')
         self._save_review_badge_appearance_settings()

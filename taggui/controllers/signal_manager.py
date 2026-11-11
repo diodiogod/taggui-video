@@ -693,6 +693,10 @@ class SignalManager:
                 return str(Path(path)).casefold()
 
         restored_paths = {path_key(path) for path in media_paths if path}
+        self.main_window._refresh_review_sticker_overlays(
+            media_paths=media_paths,
+            source_model=source_model,
+        )
         target_viewer = self.main_window.get_selection_target_viewer()
         if target_viewer is None:
             target_viewer = self.main_window.image_viewer
@@ -726,7 +730,7 @@ class SignalManager:
         # bookkeeping settles so the restored geometry is visible immediately.
         QTimer.singleShot(
             0,
-            lambda viewer=target_viewer: viewer.rebuild_marking_overlays(),
+            target_viewer, target_viewer.rebuild_marking_overlays,
         )
         self.main_window.ideogram_caption_editor.load_media(image)
         self.main_window.image_tags_editor.reload_ideogram_caption_for_current_image()

@@ -4,10 +4,10 @@
 [![Stars](https://img.shields.io/github/stars/diodiogod/taggui-video?style=for-the-badge)](https://github.com/diodiogod/taggui-video/stargazers)
 [![Issues](https://img.shields.io/github/issues/diodiogod/taggui-video?style=for-the-badge)](https://github.com/diodiogod/taggui-video/issues)
 [![Forks](https://img.shields.io/github/forks/diodiogod/taggui-video?style=for-the-badge)](https://github.com/diodiogod/taggui-video/network/members)
-[![Version](https://img.shields.io/badge/version-1.7.6-1f6feb?style=for-the-badge)](https://github.com/diodiogod/taggui-video)
+[![Version](https://img.shields.io/badge/version-1.8.0-1f6feb?style=for-the-badge)](https://github.com/diodiogod/taggui-video)
 [![Ko-Fi](https://img.shields.io/badge/Ko--fi-F16061?style=for-the-badge&logo=ko-fi&logoColor=white)](https://ko-fi.com/diogogo)
 
-# TagGUI Video 1M v1.7.6
+# TagGUI Video 1M v1.8.0
 
 <p align="center">
   <img src="images/icon.png" alt="TagGUI Video 1M icon" width="96">
@@ -36,6 +36,7 @@ Captioning and tagging remain core to the project, including workflows that supp
 - [Video Surface Controls](docs/VIDEO_SURFACE_CONTROLS_GUIDE.md)
 - [Floating Viewers and Compare Mode](docs/FLOATING_VIEWERS_USER_GUIDE.md)
 - [Masonry Review Wall and Badges](docs/MASONRY_REVIEW_WALL_GUIDE.md)
+- [Image Stickers](docs/STICKERS_GUIDE.md)
 - [Quick Sort Keyboard Classification](docs/QUICK_SORT_GUIDE.md)
 - [Ideogram 4 Structured Captions](docs/IDEOGRAM4_GUIDE.md)
 - [Copy Generation Prompts](docs/SHORTCUTS.md#generation-prompts)

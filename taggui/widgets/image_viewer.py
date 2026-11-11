@@ -43,6 +43,7 @@ from widgets.compare_divider_utils import (
 from widgets.reaction_feedback_overlay import ReactionFeedbackOverlay
 from widgets.marking import (MarkingItem, MarkingLabel, ResizeHintHUD,
                               marking_colors, calculate_grid)
+from widgets.review_sticker_controls import ReviewStickerControls
 from widgets.marking_view import ImageGraphicsView
 from widgets.ideogram_label_item import IdeogramLabelItem
 from widgets.ideogram_region_item import IdeogramRegionItem
@@ -459,6 +460,10 @@ class ImageViewer(QWidget):
         self._ideogram_color_pick_index: int | None = None
 
         self.view = ImageGraphicsView(self.scene, self)
+        self.sticker_controls = ReviewStickerControls(
+            self,
+            interactive=not is_spawned_viewer,
+        )
         self.view.setOptimizationFlags(QGraphicsView.DontSavePainterState)
         self._ideogram_edit_shortcuts = []
         for key_sequence in (
@@ -1720,6 +1725,8 @@ class ImageViewer(QWidget):
             self._show_controls_temporarily()
         else:
             self._show_controls_permanent()
+        if had_compare and self.sticker_controls:
+            self.sticker_controls.refresh(self.current_media)
         return had_compare
 
     def enter_compare_mode(
@@ -1768,6 +1775,8 @@ class ImageViewer(QWidget):
         self._compare_reveal_timer.stop()
         self._clear_compare_scene_items()
         self._compare_mode_active = True
+        if self.sticker_controls:
+            self.sticker_controls.refresh(None)
         self._compare_base_index = QPersistentModelIndex(base_proxy)
         self._compare_last_viewer_pos = None
         if not keep_split_ratio:
@@ -4520,6 +4529,8 @@ class ImageViewer(QWidget):
             self.add_rectangle(marking.rect, marking.type, interactive=False,
                                name=marking.label, confidence=marking.confidence)
         self._load_ideogram_caption_overlays(image)
+        if self.sticker_controls:
+            self.sticker_controls.refresh(image)
 
     def rating_change(self, rating: float):
         if self.proxy_image_index.isValid():

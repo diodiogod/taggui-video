@@ -169,6 +169,32 @@ Hold mode freezes existing spawned viewers as dimmed, gray, click-through overla
 
 Badge shortcuts can be customized in `Settings -> Badges`.
 
+When the pointer is over a still image in the main viewer, these shortcuts place
+stickers at the cursor instead of toggling the image-level badge. Move the
+pointer away from the image to use the normal toggle action.
+
+## Image Stickers
+
+| Control | Action |
+| --- | --- |
+| **Review badge shortcut over the main image** | Place that badge at the cursor. Repeat to add more stickers. |
+| **L / B over the main image** | Animate a heart / bomb into a sticker at the cursor. |
+| **L / B away from the main image** | Toggle Love / Bomb with the original reaction animation. |
+| **Drag a review badge or reaction button onto the image** | Place a sticker where you release. |
+| **Alt + right-click on the main image** | Choose a sticker at that point. |
+| **Left-drag a sticker** | Move it. |
+| **Alt + left-drag horizontally on a sticker** | Enlarge to the right; shrink to the left. |
+| **Right-drag horizontally on a sticker** | The same resize gesture using the right mouse button. |
+| **Right-click a sticker** | Replace it, remove it, or choose **Clear all stickers** for the image. |
+| **Ctrl+Z / Ctrl+Y** | Undo / redo sticker edits, including clearing. |
+
+Toolbar clicks retain their normal badge/reaction behavior. Turning a badge or
+reaction off removes only its matching stickers. Floating viewers show saved
+stickers; placement and editing belong to the main viewer.
+
+See the [Stickers Guide](STICKERS_GUIDE.md) for rank fallback, appearance settings,
+sidecar storage, and viewer support.
+
 ## Contextual Video Surface Controls
 
 - Hover lower left or lower right on a video with hidden controls: reveal contextual seek zones
@@ -199,6 +225,7 @@ Floating viewers do not have their own fullscreen mode.
 
 - [Floating Viewers User Guide](FLOATING_VIEWERS_USER_GUIDE.md)
 - [Masonry Review Wall Guide](MASONRY_REVIEW_WALL_GUIDE.md)
+- [Stickers Guide](STICKERS_GUIDE.md)
 - [Compare Guide](COMPARE_GUIDE.md)
 - [Filtering Guide](FILTERING_GUIDE.md)
 - [Text Transform and Spatial Caption Review Guide](TEXT_TRANSFORM_SPATIAL_REVIEW_GUIDE.md)

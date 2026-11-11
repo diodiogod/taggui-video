@@ -23,6 +23,7 @@ from pyparsing import (CaselessKeyword, CaselessLiteral, Combine, Group, OpAssoc
 from models.proxy_image_list_model import ProxyImageListModel
 from models.image_list_model import natural_sort_key
 from utils.image import Image
+from widgets.review_badge_paint import draw_overlay_chip, draw_review_badge
 from utils.review_marks import (
     ReviewFlag,
     get_review_badge_corner_radius,
@@ -1264,19 +1265,7 @@ class ImageDelegate(QStyledItemDelegate):
 
             for label, color in badges:
                 badge_rect = QRect(x, y, badge_size, badge_size)
-                fill, outline = self._review_badge_palette(color, style_spec)
-                self._draw_overlay_chip(
-                    painter,
-                    badge_rect,
-                    fill=fill,
-                    outline=outline,
-                    radius=radius,
-                    shadow=QColor(style_spec.get('shadow', QColor(0, 0, 0, 60))),
-                    variant=str(style_spec.get('variant', 'solid') or 'solid'),
-                    glass_highlight=QColor(style_spec.get('glass_highlight', QColor(255, 255, 255, 68))),
-                    text=label,
-                    text_color=text_color,
-                )
+                draw_review_badge(painter, badge_rect, label, color, style_spec, radius, text_color)
                 x -= badge_size + gap
 
             painter.restore()
@@ -1342,25 +1331,6 @@ class ImageDelegate(QStyledItemDelegate):
         )
         return path
 
-    @staticmethod
-    def _color_with_alpha(color: QColor, alpha: int) -> QColor:
-        result = QColor(color)
-        result.setAlpha(max(0, min(255, int(alpha))))
-        return result
-
-    @staticmethod
-    def _blend_colors(first: QColor, second: QColor, ratio: float, alpha: int | None = None) -> QColor:
-        ratio = max(0.0, min(1.0, float(ratio)))
-        mixed = QColor(
-            int(first.red() * (1.0 - ratio) + second.red() * ratio),
-            int(first.green() * (1.0 - ratio) + second.green() * ratio),
-            int(first.blue() * (1.0 - ratio) + second.blue() * ratio),
-            int(first.alpha() * (1.0 - ratio) + second.alpha() * ratio),
-        )
-        if alpha is not None:
-            mixed.setAlpha(max(0, min(255, int(alpha))))
-        return mixed
-
     def _review_badge_style_spec(self) -> dict:
         return get_thumbnail_review_badge_style_spec(
             str(getattr(self, '_review_badge_style', 'review_tile') or 'review_tile')
@@ -1371,89 +1341,12 @@ class ImageDelegate(QStyledItemDelegate):
             str(getattr(self, '_reaction_badge_style', 'review_tile') or 'review_tile')
         )
 
-    def _review_badge_palette(self, base_color: QColor, style_spec: dict) -> tuple[QColor, QColor]:
-        fill_mode = str(style_spec.get('fill_mode', 'base') or 'base')
-        if fill_mode == 'dark':
-            fill = QColor(style_spec.get('dark_fill', QColor(27, 30, 37, 236)))
-        elif fill_mode == 'base_soft':
-            fill = QColor(base_color)
-            fill.setAlpha(int(style_spec.get('fill_alpha', 120)))
-        elif fill_mode == 'warm_base':
-            fill = self._blend_colors(
-                QColor(base_color),
-                QColor(style_spec.get('warm_tint', QColor(255, 162, 102, 255))),
-                float(style_spec.get('warm_ratio', 0.16)),
-                alpha=QColor(base_color).alpha(),
-            )
-        else:
-            fill = QColor(base_color)
-
-        if str(style_spec.get('outline_mode', 'fixed') or 'fixed') == 'base':
-            outline = self._color_with_alpha(QColor(base_color), int(style_spec.get('outline_alpha', 230)))
-        else:
-            outline = QColor(style_spec.get('outline', QColor(255, 255, 255, 235)))
-        return fill, outline
-
     def _reaction_badge_palette(self, kind: str, style_spec: dict) -> tuple[QColor, QColor, QColor]:
         prefix = 'love' if str(kind or '').strip().lower() == 'love' else 'bomb'
         fill = QColor(style_spec.get(f'{prefix}_fill', QColor(255, 255, 255, 240)))
         outline = QColor(style_spec.get(f'{prefix}_outline', style_spec.get('outline', QColor(255, 255, 255, 235))))
         icon = QColor(style_spec.get(f'{prefix}_icon', QColor(255, 255, 255, 255)))
         return fill, outline, icon
-
-    def _draw_overlay_chip(
-        self,
-        painter,
-        rect: QRect,
-        *,
-        fill: QColor,
-        outline: QColor,
-        radius: float,
-        shadow: QColor,
-        variant: str = 'solid',
-        glass_highlight: QColor | None = None,
-        text: str | None = None,
-        text_color: QColor | None = None,
-        path: QPainterPath | None = None,
-        icon_color: QColor | None = None,
-    ):
-        shadow_rect = rect.translated(1, 1)
-        shadow_pen = QColor(0, 0, 0, min(255, shadow.alpha() + 6))
-        painter.setPen(QPen(shadow_pen, 1.1))
-        painter.setBrush(shadow)
-        painter.drawRoundedRect(shadow_rect, radius, radius)
-        painter.setPen(QPen(outline, 1.1))
-        painter.setBrush(fill)
-        painter.drawRoundedRect(rect, radius, radius)
-
-        if variant == 'glass':
-            highlight = QRect(
-                rect.left() + 1,
-                rect.top() + 1,
-                max(6, rect.width() - 2),
-                max(4, int(rect.height() * 0.45)),
-            )
-            painter.setPen(Qt.PenStyle.NoPen)
-            painter.setBrush(QColor(glass_highlight or QColor(255, 255, 255, 68)))
-            painter.drawRoundedRect(highlight, max(3.0, radius - 2.0), max(3.0, radius - 2.0))
-
-        if path is not None and icon_color is not None:
-            painter.setPen(
-                QPen(
-                    icon_color,
-                    1.3,
-                    Qt.PenStyle.SolidLine,
-                    Qt.PenCapStyle.RoundCap,
-                    Qt.PenJoinStyle.RoundJoin,
-                )
-            )
-            painter.setBrush(icon_color)
-            painter.drawPath(path)
-            return
-
-        if text is not None and text_color is not None:
-            painter.setPen(text_color)
-            painter.drawText(rect, Qt.AlignmentFlag.AlignCenter, text)
 
     def _star_rating_value_text(self, image) -> str | None:
         try:
@@ -1691,7 +1584,7 @@ class ImageDelegate(QStyledItemDelegate):
             for kind, _background_color, _icon_color in badges:
                 badge_rect = QRect(x, y, badge_size, badge_size)
                 fill, outline, icon_color = self._reaction_badge_palette(kind, style_spec)
-                self._draw_overlay_chip(
+                draw_overlay_chip(
                     painter,
                     badge_rect,
                     fill=fill,
