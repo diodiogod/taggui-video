@@ -1628,6 +1628,12 @@ class ImageListViewGeometryMixin:
                 selected_indices = []
             if any(index == model_index for index in selected_indices):
                 indices = selected_indices
+        if external_only and self._drag_export_mode() == 'workflow_smart':
+            from widgets.workflow_archive_drag import WorkflowArchiveDrag
+            if not hasattr(self, '_workflow_archive_drag'):
+                self._workflow_archive_drag = WorkflowArchiveDrag(self)
+            if not self._workflow_archive_drag.prepare(indices, model_index, supportedActions):
+                return
         dragged_index = QPersistentModelIndex(model_index)
         dragged_path = None
         try:

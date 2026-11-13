@@ -29,7 +29,12 @@ This page collects the most useful keyboard shortcuts and quick actions currentl
 - Use `Ctrl` + double-click for the alternate floating-viewer or system-app action
 - Open selected image in Windows Explorer: `Alt` + double-click
 - Drag a real file to another app instead of spawning a floating viewer: hold `Alt` while dragging from the image list
-- Drag a sibling workflow `.json` to another app when present, otherwise drag the media file: hold `Ctrl` + `Alt` while dragging from the image list
+- Drag a sibling workflow `.json` to another app, then try `workflows.7z`, otherwise drag the media file: hold `Ctrl` + `Alt` while dragging from the image list
+- Open the ComfyUI Workflow Archive tool directly: `Ctrl` + `Alt` + `Shift` + `F7`
+
+To save space on repeated ComfyUI workflows, open **Settings → Advanced → Maintenance → Workflow Archive…** (or **Ctrl+Alt+Shift+F7**). Choose a media folder and create/update its solid `workflows.7z` (requires installed [7-Zip](https://www.7-zip.org/), or `7z`/`7zz` on PATH). Only recognized accompanying workflow JSON is packed; metadata, unrelated JSON, and subfolders stay untouched. **Removal of archived originals is on by default**; uncheck it to keep loose copies. **Restore Originals** recovers them without overwriting existing files and keeps the archive. This is separate from caption Ctrl+Z undo.
+
+Repeat runs reuse indexed workflows without parsing them again. Cleanup-only runs do not rebuild the archive; additions compress only new workflows, with live compression/verification percentages. Older archives need one content comparison for loose files missing saved file details. Changed versions with the same name stop the update. Keep the archive alongside the media and retain any `.workflow-originals-*` recovery folder left by interrupted cleanup. Ctrl+Alt+drag extracts to a temporary cache; if preparation outlasts the gesture, a tooltip asks you to drag again.
 - Spawn a floating viewer by drag and release: drag a thumbnail from the list or masonry view and release it on empty screen space
 
 The image context menu includes actions such as copying or pasting tags and moving or copying selected files.

@@ -5,6 +5,23 @@ All notable changes to TagGUI Video 1M are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.8.1] - 2026-11-13
+
+### Added
+
+- Archive ComfyUI workflows to save space
+- Retrieve archived workflows with Ctrl+Alt+drag
+- Open Workflow Archive from Advanced settings or Ctrl+Alt+Shift+F7
+- Reuse unchanged workflows and skip recompression on cleanup-only runs
+- Show live scan counts, elapsed time, and compression and verification percentages
+
+### Changed
+
+- Create or update workflows.7z from accompanying ComfyUI workflows while leaving metadata sidecars untouched
+
+### Removed
+
+- Remove archived originals by default and recover them with Restore Originals
 ## [1.8.0] - 2026-11-11
 
 ### Added

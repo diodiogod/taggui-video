@@ -254,6 +254,10 @@ class ImageListViewInteractionMixin:
             workflow_path = self._workflow_sidecar_drag_path_for_image_path(image_path)
             if workflow_path is not None:
                 return workflow_path
+            from utils.workflow_archive import drag_cache
+            ready, archived_path = drag_cache.lookup(image_path)
+            if ready and archived_path is not None:
+                return archived_path
         return image_path
 
     def _event_global_point(self, event) -> QPoint:

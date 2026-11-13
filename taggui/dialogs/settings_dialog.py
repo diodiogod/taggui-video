@@ -2241,6 +2241,17 @@ class SettingsDialog(QDialog):
         maintenance_grid.addWidget(repair_current_folder_btn, 1, 1,
                                    Qt.AlignmentFlag.AlignLeft)
 
+        from dialogs.workflow_archive_dialog import WORKFLOW_ARCHIVE_SHORTCUT
+        workflow_archive_btn = QPushButton('Workflow Archive…')
+        workflow_archive_btn.setToolTip(
+            f'Open directly with {WORKFLOW_ARCHIVE_SHORTCUT}.\n\n'
+            'Compress accompanying ComfyUI workflows into workflows.7z to save space. '
+            'Metadata sidecars stay untouched. Includes safe restoration and Ctrl+Alt+drag support.')
+        workflow_archive_btn.clicked.connect(self.open_workflow_archive)
+        maintenance_grid.addWidget(QLabel('ComfyUI workflow storage'), 2, 0,
+                                   Qt.AlignmentFlag.AlignRight)
+        maintenance_grid.addWidget(workflow_archive_btn, 2, 1, Qt.AlignmentFlag.AlignLeft)
+
         diagnostics_grid.addWidget(QLabel('Diagnostic log mode'), 0, 0,
                                    Qt.AlignmentFlag.AlignRight)
         diagnostic_log_mode_combo = SettingsComboBox(
@@ -2278,6 +2289,11 @@ class SettingsDialog(QDialog):
         grid.setHorizontalSpacing(10)
         grid.setVerticalSpacing(8)
         return group, grid
+
+    @Slot()
+    def open_workflow_archive(self):
+        from dialogs.workflow_archive_dialog import open_workflow_archive_dialog
+        open_workflow_archive_dialog(self)
 
     @Slot()
     def repair_current_folder_extensionless_images(self):

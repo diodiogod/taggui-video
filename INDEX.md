@@ -116,6 +116,7 @@ TagGUI is a desktop app for image/video tagging, captioning, and dataset prepara
 - `wall_layout_settings.py`: Grouped live wall preferences, shared by the dedicated panel and main Settings dialog.
 
 - `settings_dialog.py`: App settings UI.
+- `workflow_archive_dialog.py`: Opt-in creation, verified cleanup, and restoration of folder-local ComfyUI workflow archives.
 - `export_dialog.py`: Export workflow dialog.
 - `caption_multiple_images_dialog.py`: Batch caption dialog.
 - `batch_reorder_tags_dialog.py`: Batch tag reorder dialog.

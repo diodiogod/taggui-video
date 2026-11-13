@@ -778,10 +778,23 @@ class MenuManager(QObject):
         settings_action.triggered.connect(self.main_window.show_settings_dialog)
         file_menu.addAction(settings_action)
 
+        # Keep this specialized tool in Advanced settings, with a direct
+        # application shortcut that also works from floating viewers.
+        from dialogs.workflow_archive_dialog import WORKFLOW_ARCHIVE_SHORTCUT
+        self.workflow_archive_action = QAction('Workflow Archive…', self.main_window)
+        self.workflow_archive_action.setShortcut(QKeySequence(WORKFLOW_ARCHIVE_SHORTCUT))
+        self.workflow_archive_action.setShortcutContext(Qt.ShortcutContext.ApplicationShortcut)
+        self.workflow_archive_action.triggered.connect(self._show_workflow_archive)
+        self.main_window.addAction(self.workflow_archive_action)
+
         exit_action = QAction('Exit', parent=self.main_window)
         exit_action.setShortcut(QKeySequence('Ctrl+W'))
         exit_action.triggered.connect(self.main_window.close)
         file_menu.addAction(exit_action)
+
+    def _show_workflow_archive(self):
+        from dialogs.workflow_archive_dialog import open_workflow_archive_dialog
+        open_workflow_archive_dialog(self.main_window)
 
     def _show_main_generation_prompt(self):
         from widgets.generation_prompt_dialog import open_generation_prompt
