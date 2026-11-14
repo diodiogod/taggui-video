@@ -6,7 +6,7 @@ from __future__ import annotations
 import os
 import re
 from datetime import datetime
-from typing import Dict, List, Optional
+from typing import Dict, Optional
 
 
 class VersionManager:
@@ -106,78 +106,33 @@ class VersionManager:
                 success = False
         return success
 
-    def _has_whole_word(self, text: str, words: List[str]) -> bool:
-        return any(re.search(rf"\b{re.escape(word)}\b", text) for word in words)
-
-    def _categorize_line(self, line: str) -> str:
-        text = line.lower()
-        if self._has_whole_word(
-            text,
-            [
-                "fix",
-                "bug",
-                "error",
-                "issue",
-                "resolve",
-                "correct",
-                "crash",
-                "problem",
-                "broken",
-                "regression",
-            ],
-        ):
-            return "Fixed"
-        if self._has_whole_word(
-            text,
-            ["remove", "delete", "deprecate", "drop", "eliminate"],
-        ):
-            return "Removed"
-        if self._has_whole_word(
-            text,
-            [
-                "improve",
-                "enhance",
-                "optimize",
-                "update",
-                "change",
-                "refactor",
-                "performance",
-                "better",
-                "faster",
-            ],
-        ):
-            return "Changed"
-        return "Added"
-
     def _generate_changelog_entry(self, version: str, description: str) -> str:
-        lines = [line.strip() for line in description.splitlines() if line.strip()]
-        if len(lines) < 2:
-            raise ValueError(
-                "Changelog descriptions must be multiline so release notes stay useful."
-            )
-
-        sections: Dict[str, List[str]] = {
-            "Added": [],
-            "Changed": [],
-            "Fixed": [],
-            "Removed": [],
+        """Wrap authored Markdown without classifying or rewriting its contents."""
+        body = description.strip()
+        categories = {
+            "### Added", "### Changed", "### Deprecated",
+            "### Removed", "### Fixed", "### Security",
         }
-        for raw_line in lines:
-            cleaned = re.sub(r"^[-*•]\s*", "", raw_line)
-            if not cleaned:
-                continue
-            sections[self._categorize_line(cleaned)].append(cleaned)
+        lines = body.splitlines()
+        if not lines or lines[0] not in categories:
+            raise ValueError(
+                "Provide an authored changelog body with explicit category headings, "
+                "for example: '### Fixed\n\n- Describe the user-facing fix'. "
+                "The script no longer categorizes descriptions by keywords."
+            )
+        for line in lines:
+            if re.match(r"^#{1,3}(?:\s|$)", line) and line not in categories:
+                raise ValueError(
+                    f"Unsupported changelog heading: {line!r}. Use Added, Changed, "
+                    "Deprecated, Removed, Fixed, or Security at level 3; "
+                    "the script supplies the version/date header."
+                )
+        sections = re.split(r"(?m)^### .*$", body)[1:]
+        if any(not section.strip() for section in sections):
+            raise ValueError("Omit empty changelog sections.")
 
         today = datetime.now().strftime("%Y-%m-%d")
-        entry_lines = [f"## [{version}] - {today}"]
-        for heading in ("Added", "Changed", "Fixed", "Removed"):
-            items = sections[heading]
-            if not items:
-                continue
-            entry_lines.extend(["", f"### {heading}", ""])
-            entry_lines.extend(f"- {item}" for item in items)
-        entry_lines.append("")
-        return "\n".join(entry_lines)
+        return f"## [{version}] - {today}\n\n{body}\n\n"
 
     def preview_changelog_entry(self, version: str, description: str) -> str:
         return self._generate_changelog_entry(version, description)
@@ -205,7 +160,7 @@ class VersionManager:
         if insert_index > 0 and lines[insert_index - 1] != "":
             lines.insert(insert_index, "")
             insert_index += 1
-        lines.insert(insert_index, new_entry)
+        lines.insert(insert_index, new_entry + "\n")
         updated_content = "\n".join(lines).rstrip() + "\n"
 
         try:

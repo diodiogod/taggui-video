@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import os
 import subprocess
+import sys
 import tempfile
 
 from version_utils import VersionManager
@@ -63,12 +64,16 @@ def main() -> int:
     )
     parser.add_argument(
         "commit_description",
+        nargs="?",
         help="Commit message body describing the implementation details",
     )
     parser.add_argument(
         "changelog_description",
-        help="Multiline user-facing changelog description",
+        nargs="?",
+        help="Authored Markdown changelog body with explicit category headings",
     )
+    parser.add_argument("--commit-file", help="Read commit description from a UTF-8 file")
+    parser.add_argument("--changelog-file", help="Read authored Markdown changelog body from a UTF-8 file")
     parser.add_argument("--dry-run", action="store_true", help="Preview changes only")
     parser.add_argument("--no-commit", action="store_true", help="Skip git commit")
     parser.add_argument(
@@ -77,6 +82,24 @@ def main() -> int:
         help="Allow setting a non-increasing version",
     )
     args = parser.parse_args()
+
+    if args.commit_file or args.changelog_file:
+        if not (args.commit_file and args.changelog_file):
+            parser.error("Use --commit-file and --changelog-file together")
+        if args.commit_description is not None or args.changelog_description is not None:
+            parser.error("Use either positional descriptions or file inputs, not both")
+        try:
+            with open(args.commit_file, encoding="utf-8-sig") as handle:
+                commit_description = handle.read().strip()
+            with open(args.changelog_file, encoding="utf-8-sig") as handle:
+                changelog_description = handle.read().strip()
+        except (OSError, UnicodeError) as exc:
+            parser.error(f"Cannot read release descriptions: {exc}")
+    else:
+        if not args.commit_description or not args.changelog_description:
+            parser.error("Provide both commit and changelog descriptions, or both file inputs")
+        commit_description = args.commit_description.replace("\\n", "\n").strip()
+        changelog_description = args.changelog_description.replace("\\n", "\n").strip()
 
     version_manager = VersionManager()
     current_version = version_manager.get_current_version()
@@ -95,8 +118,11 @@ def main() -> int:
         )
         return 1
 
-    commit_description = args.commit_description.replace("\\n", "\n").strip()
-    changelog_description = args.changelog_description.replace("\\n", "\n").strip()
+    try:
+        changelog_preview = version_manager.preview_changelog_entry(new_version, changelog_description)
+    except ValueError as exc:
+        print(f"Error: {exc}")
+        return 1
 
     print(f"Current version: {current_version}")
     print(f"New version: {new_version}")
@@ -117,11 +143,7 @@ def main() -> int:
             print(f"- {marker} {relative_path}")
         print("\n[DRY RUN] Changelog preview:")
         print("=" * 50)
-        try:
-            print(version_manager.preview_changelog_entry(new_version, changelog_description).rstrip())
-        except ValueError as exc:
-            print(str(exc))
-            return 1
+        print(changelog_preview.rstrip())
         print("=" * 50)
         if not args.no_commit:
             print("[DRY RUN] A git commit would be created.")
@@ -175,4 +197,7 @@ def main() -> int:
 
 
 if __name__ == "__main__":
+    for stream in (sys.stdout, sys.stderr):
+        if hasattr(stream, "reconfigure"):
+            stream.reconfigure(encoding="utf-8", errors="replace")
     raise SystemExit(main())
