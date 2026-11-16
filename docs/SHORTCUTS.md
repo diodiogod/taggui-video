@@ -15,6 +15,7 @@ This page collects the most useful keyboard shortcuts and quick actions currentl
 - Focus `Image Tags`: `Alt` + `I`
 - Focus `Search Tags`: `Alt` + `S`
 - Focus `Start Auto-Captioning`: `Alt` + `C`
+- Refresh new media for the last active browser: `Alt` + `R`
 
 ## Images Pane
 

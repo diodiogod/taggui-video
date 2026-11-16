@@ -758,6 +758,7 @@ class MenuManager(QObject):
             [QKeySequence('Ctrl+Shift+L'), QKeySequence('F5')])
         self.reload_directory_action.triggered.connect(self.main_window.reload_directory)
         file_menu.addAction(self.reload_directory_action)
+        self.refresh_new_media_only_action.setShortcut(QKeySequence('Alt+R'))
         self.refresh_new_media_only_action.triggered.connect(self.main_window.refresh_new_media_only)
         file_menu.addAction(self.refresh_new_media_only_action)
 
