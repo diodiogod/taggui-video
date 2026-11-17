@@ -34,6 +34,7 @@ class WallResizePreview(QObject):
 
     def update(self, source):
         if (not getattr(source, '_resize_active', False)
+                or getattr(source, '_resize_group_active', False)
                 or not getattr(source, '_selection_masonry_wall_window', False)
                 or getattr(source, '_wall_skip_reflow', False)
                 or not self.wall.automatic_layout_enabled

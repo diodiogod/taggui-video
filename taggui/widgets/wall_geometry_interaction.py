@@ -32,5 +32,6 @@ class WallGeometryInteraction:
         controller = self._wall_controller()
         if controller is not None:
             controller.resize_preview.cancel()
-        if commit and controller is not None and self.geometry().size() != previous.size():
+        if (commit and controller is not None and not getattr(self, '_resize_group_active', False)
+                and self.geometry().size() != previous.size()):
             controller.resize_finished(self, bool(getattr(self, '_wall_skip_reflow', False)))

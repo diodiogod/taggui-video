@@ -62,6 +62,13 @@ Hold **Shift** to preserve proportions while resizing. The setting **Settings â†
 Advanced â†’ Floating resize keeps aspect ratio by default** reverses this behavior:
 proportions are then preserved by default, and Shift allows free resizing.
 
+Hold **Ctrl** when starting an edge or corner drag to resize **all open floating
+viewers** to the dragged window's dimensions, including regular viewers outside
+the wall. Add **Shift** for the usual aspect-ratio toggle. Siblings resize live
+at their existing positions; release to arrange the wall while keeping the chosen
+sizes. **Alt** skips arrangement; **Escape** restores all starting sizes and positions.
+Ctrl-drag inside a window still places and pins it.
+
 ![Before, during, and after resizing: window A keeps its chosen size while the other windows rearrange.](../images/guides/wall-resize-reflow.png)
 
 *Illustrations are schematic. Amber borders and lock symbols highlight the chosen

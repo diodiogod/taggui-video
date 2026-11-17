@@ -1622,6 +1622,10 @@ class FloatingViewerWindow(WallGeometryInteraction, QWidget):
 
         min_w = max(10, self.minimumWidth())
         min_h = max(10, self.minimumHeight())
+        group_minimum = getattr(self, '_resize_group_minimum_size', None)
+        if group_minimum is not None:
+            min_w = max(min_w, group_minimum.width())
+            min_h = max(min_h, group_minimum.height())
 
         preserve_aspect = self._aspect_preserve_resize_active()
 
@@ -1779,8 +1783,17 @@ class FloatingViewerWindow(WallGeometryInteraction, QWidget):
             self._cancel_compare_drag_signal()
         self._resize_active = True
         self._resize_corner = zone_name
-        self._resize_start_geometry = self.geometry()
         self._resize_start_global_pos = self._event_global_pos(event)
+        self._capture_window_resize_state()
+        self._window_drag_active = False
+        self._window_drag_button = Qt.MouseButton.NoButton
+        self._active_drag_handle = None
+        self._set_view_resize_anchor_for_window_resize(True)
+        self._emit_activated()
+        self._update_shift_resize_visuals(self._resize_start_global_pos)
+
+    def _capture_window_resize_state(self):
+        self._resize_start_geometry = self.geometry()
         try:
             self._resize_start_zoom_factor = abs(float(self.viewer.view.transform().m11()))
         except Exception:
@@ -1797,12 +1810,6 @@ class FloatingViewerWindow(WallGeometryInteraction, QWidget):
                 self._resize_start_focus_scene_pos = QPointF()
         except Exception:
             self._resize_start_focus_scene_pos = QPointF()
-        self._window_drag_active = False
-        self._window_drag_button = Qt.MouseButton.NoButton
-        self._active_drag_handle = None
-        self._set_view_resize_anchor_for_window_resize(True)
-        self._emit_activated()
-        self._update_shift_resize_visuals(self._resize_start_global_pos)
 
     def _end_window_resize(self, event=None, *, commit=True):
         was_active = self._resize_active

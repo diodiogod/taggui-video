@@ -4,6 +4,8 @@ from PySide6.QtCore import QObject, QEvent, Qt
 from PySide6.QtWidgets import QApplication, QWidget
 from shiboken6 import isValid
 
+from controllers.floating_resize_group import FloatingResizeGroup
+
 
 class FloatingResizeInput(QObject):
     def __init__(self, wall):
@@ -11,6 +13,7 @@ class FloatingResizeInput(QObject):
         self.wall = wall
         self.active = None
         self.hover = None
+        self.group = FloatingResizeGroup(wall)
         QApplication.instance().installEventFilter(self)
 
     def restore_cursor(self):
@@ -41,6 +44,8 @@ class FloatingResizeInput(QObject):
         window = ref() if ref else None
         if window is not None and isValid(window):
             window._end_window_resize(event, commit=commit)
+        self.group.finish(commit=commit)
+        if window is not None and isValid(window):
             window.releaseMouse()
 
     def eventFilter(self, watched, event):
@@ -49,9 +54,17 @@ class FloatingResizeInput(QObject):
             window = self.active()
             if window is None or not isValid(window):
                 self.active = None
+                self.group.finish(commit=False)
+            elif self.group.source and kind == QEvent.ShortcutOverride and event.key() == Qt.Key_Escape:
+                event.accept()
+                return True
+            elif self.group.source and kind == QEvent.KeyPress and event.key() == Qt.Key_Escape:
+                self.finish(commit=False)
+                return True
             elif kind == QEvent.MouseMove:
                 window._track_wall_geometry_gesture(event)
                 window._apply_corner_resize(event.globalPosition().toPoint())
+                self.group.update()
                 return True
             elif kind == QEvent.MouseButtonRelease and event.button() == Qt.LeftButton:
                 self.finish(event)
@@ -62,8 +75,7 @@ class FloatingResizeInput(QObject):
             self.restore_cursor()
         if kind not in (QEvent.MouseMove, QEvent.MouseButtonPress) or not isinstance(watched, QWidget):
             return False
-        if (event.modifiers() & Qt.ControlModifier
-                or (kind == QEvent.MouseMove and event.buttons() != Qt.NoButton)):
+        if kind == QEvent.MouseMove and event.buttons() != Qt.NoButton:
             self.restore_cursor()
             return False
         window = watched
@@ -88,6 +100,8 @@ class FloatingResizeInput(QObject):
             self.set_hover_cursor(watched, window._cursor_for_resize_zone(zone))
         elif event.button() == Qt.LeftButton:
             window._begin_window_resize(event, zone)
+            if event.modifiers() & Qt.ControlModifier:
+                self.group.begin(window)
             self.active = weakref.ref(window)
             window.grabMouse()
             return True

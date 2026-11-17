@@ -150,18 +150,21 @@ class FloatingWallController(QObject):
         return [w for w in self.host._iter_rearrangeable_floating_media_windows()
                 if getattr(w, '_selection_masonry_wall_window', False) and w.isVisible()]
 
-    def resize_finished(self, window, bypass):
-        if not getattr(window, '_selection_masonry_wall_window', False):
+    def resize_finished(self, window, bypass, *, windows=None):
+        resized = [w for w in (windows if windows is not None else [window])
+                   if getattr(w, '_selection_masonry_wall_window', False)]
+        if not resized:
             return
         # Keep the latest deliberate size even during manual mode / Alt bypass.
-        window._wall_fixed_size = (window.width(), window.height())
-        if getattr(window, '_wall_size_lock_kind', None) != 'explicit':
-            window._wall_size_lock_kind = 'manual'
+        for target in resized:
+            target._wall_fixed_size = (target.width(), target.height())
+            if getattr(target, '_wall_size_lock_kind', None) != 'explicit':
+                target._wall_size_lock_kind = 'manual'
         self._refresh_menus()
         if not bypass:
-            self.request_reflow(window)
+            self.request_reflow(window, fixed_windows=resized if windows is not None else ())
 
-    def request_reflow(self, source=None, *, force=False, reset_sizes=False):
+    def request_reflow(self, source=None, *, force=False, reset_sizes=False, fixed_windows=()):
         self.cancel()
         if getattr(self.host, '_main_window_closing', False):
             return
@@ -189,6 +192,11 @@ class FloatingWallController(QObject):
             windows, bounds, preserve_order=self.host._floating_viewer_rearrange_preserve_screen_order(),
             reset_sizes=reset_sizes,
         )
+        # A synchronized resize must retain the requested dimensions even when
+        # remembering manual sizes is disabled. Later arrangements use the preference.
+        for index, window in enumerate(windows):
+            if window in fixed_windows:
+                payload[2]['fixed_sizes'][index] = (window.width(), window.height())
         entries = [(weakref.ref(w), QRect(w.geometry())) for w in windows]
         token = self.worker.submit(_calculate, payload)
         self._pending = (token, entries, weakref.ref(screen), screen_bounds, weakref.ref(source))

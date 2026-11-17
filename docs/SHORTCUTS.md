@@ -148,6 +148,7 @@ Examples:
 - Move a floating viewer: `middle-click + drag`
 - Move a non-pannable floating viewer: `left-drag`
 - Resize a floating viewer: drag any edge or corner
+- Resize all floating viewers to the same dimensions: hold `Ctrl` when starting an edge/corner drag (`Esc` cancels; add `Shift` for the usual aspect-ratio toggle)
 - Keep floating viewer aspect ratio while resizing: hold `Shift`
 - Close a floating viewer: click the hover `X` button near the top-right corner
 

@@ -40,6 +40,8 @@ Spawn actions are blocked while the main viewer is in fullscreen mode.
 - Resize from all corners and all borders (drag edge/corner zones).
 - By default, hold `Shift` while resizing to keep the floating viewer's current aspect ratio.
 - You can invert this in `Settings -> Advanced -> Floating resize keeps aspect ratio by default`, which makes aspect-preserving resize the default and uses `Shift` for temporary free resize.
+- Hold `Ctrl` when starting an edge or corner drag to resize all open floating viewers together. Every viewer matches the dragged window's width and height, even if they started at different sizes. `Shift` keeps its usual aspect-ratio toggle for the dragged window's shape; media still keeps its own proportions inside each window.
+- Synchronized resizing stays active until mouse release, even if you release `Ctrl` first. Other windows keep their positions during the drag; wall windows arrange on release using the chosen sizes. `Alt` skips that arrangement, and `Esc` cancels the synchronized resize.
 - Close button (`x`) appears on hover near the top-right corner.
 
 ## Masonry Walls

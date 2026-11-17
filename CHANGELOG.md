@@ -5,6 +5,13 @@ All notable changes to TagGUI Video 1M are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.8.2] - 2026-11-16
+
+### Added
+
+- Resize all open floating viewers together by holding Ctrl while dragging an edge or corner. Viewers match the chosen dimensions live, and masonry walls retain those sizes when rearranging on release. Esc restores the starting sizes and positions.
+- Refresh new media in the last active browser with Alt+R.
+
 ## [1.8.1] - 2026-11-13
 
 ### Added
