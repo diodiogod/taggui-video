@@ -4310,7 +4310,6 @@ class MainWindow(QMainWindow):
             sticker_change=(stickers, owned_flags),
             reaction_change=(love, bomb),
         )
-        self.image_viewer.sticker_controls.refresh(self.image_viewer.current_media)
 
     def _commit_review_state_changes(
         self,
@@ -4332,18 +4331,37 @@ class MainWindow(QMainWindow):
         if owner_model is None:
             return False
 
+        # Sticker changes repaint badges and update scene overlays directly.
+        # An unspecified role means every field changed and reloads the media.
+        data_change_roles = (Qt.ItemDataRole.DecorationRole,) if sticker_change is not None else None
+        active_filter = getattr(owner_proxy_model, 'filter', None)
+        sticker_filter_membership = {}
+        if (sticker_change is not None and active_filter
+                and (self._filter_uses_review(active_filter)
+                     or self._filter_uses_reactions(active_filter))):
+            for image, next_rank, next_flags in changed_states:
+                review_changed = (image.review_rank, image.review_flags) != (next_rank, next_flags)
+                reaction_changed = reaction_change is not None and any(
+                    value is not None and bool(getattr(image, name)) != bool(value)
+                    for name, value in zip(('love', 'bomb'), reaction_change)
+                )
+                if review_changed or reaction_changed:
+                    sticker_filter_membership[id(image)] = owner_proxy_model.is_image_in_filtered_images(image)
+
         changed_images = [image for image, _, _ in changed_states]
         if len(changed_images) == 1:
             owner_model.add_image_to_undo_stack(
                 changed_images[0],
                 action_name=action_name,
                 should_ask_for_confirmation=False,
+                data_change_roles=data_change_roles,
             )
         else:
             owner_model.add_images_to_undo_stack(
                 changed_images,
                 action_name=action_name,
                 should_ask_for_confirmation=False,
+                data_change_roles=data_change_roles,
             )
 
         review_updated_at = time.time()
@@ -4384,7 +4402,8 @@ class MainWindow(QMainWindow):
                     image.stickers_dirty = True
             image.review_rank = int(next_rank)
             image.review_flags = int(next_flags)
-            image.review_updated_at = review_updated_at
+            if sticker_change is None or (current_rank, current_flags) != (int(next_rank), int(next_flags)):
+                image.review_updated_at = review_updated_at
             reaction_changed = False
             if reaction_change is not None:
                 next_love, next_bomb = reaction_change
@@ -4400,7 +4419,11 @@ class MainWindow(QMainWindow):
             # SQL-backed review filters must see the new state before they
             # rebuild. The deferred full persistence below also writes the
             # sidecar, but would otherwise leave this refresh one event behind.
-            if image.stickers_dirty:
+            if sticker_change is not None:
+                # One sidecar write, without the generic metadata notification
+                # that reloads viewers and rebuilds every active SQL filter.
+                owner_model.write_meta_to_disk(image, notify=False)
+            elif image.stickers_dirty:
                 owner_model.persist_review_state(image)
             else:
                 try:
@@ -4422,6 +4445,7 @@ class MainWindow(QMainWindow):
             source_model=owner_model,
             proxy_model=owner_proxy_model,
             list_view=owner_list_view,
+            roles=data_change_roles,
         )
         if reaction_changed_images:
             self._refresh_reaction_sort_if_active(
@@ -4431,17 +4455,25 @@ class MainWindow(QMainWindow):
             )
             self._sync_rating_controls_from_context()
         self._refresh_review_ui_for_images(changed_images, source_model=owner_model)
-        active_filter = getattr(owner_proxy_model, 'filter', None)
-        if self._filter_uses_review(active_filter):
+        refresh_filter = sticker_change is None or any(
+            was_visible != owner_proxy_model.is_image_in_filtered_images(image)
+            for image in changed_images
+            if (was_visible := sticker_filter_membership.get(id(image))) is not None
+        )
+        if refresh_filter and self._filter_uses_review(active_filter):
             if owner_proxy_model is self.proxy_image_list_model:
                 self._arm_masonry_refresh_anchor()
             self._cover_list_during_filtered_relayout(owner_list_view)
             owner_proxy_model.set_filter(active_filter)
-        elif (reaction_changed_images
+        elif (refresh_filter and reaction_changed_images
               and self._filter_uses_reactions(active_filter)):
             if owner_proxy_model is self.proxy_image_list_model:
                 self._arm_masonry_refresh_anchor()
             owner_proxy_model.set_filter(active_filter)
+        if sticker_change is not None and refresh_filter:
+            # Reusing the same SQL predicate is a no-op in set_filter().
+            # Requery only when this edit actually changes its result set.
+            owner_model._notify_image_metadata_changed(changed_images[0], refresh_view=False)
         return True
 
     def _cover_list_during_filtered_relayout(self, list_view, timeout_ms: int = 500):
@@ -4675,7 +4707,10 @@ class MainWindow(QMainWindow):
             except Exception:
                 pass
 
-    def _emit_image_rows_changed(self, images: list[Image], *, source_model=None, proxy_model=None, list_view=None):
+    def _emit_image_rows_changed(
+        self, images: list[Image], *, source_model=None, proxy_model=None,
+        list_view=None, roles=None,
+    ):
         source_model = source_model or self.image_list_model
         if source_model is None:
             return
@@ -4698,6 +4733,7 @@ class MainWindow(QMainWindow):
         source_model.dataChanged.emit(
             source_model.index(changed_rows[0]),
             source_model.index(changed_rows[-1]),
+            list(roles) if roles is not None else [],
         )
         proxy_model = proxy_model or getattr(self, 'proxy_image_list_model', None)
         updated_proxy_rects = []
@@ -4707,7 +4743,7 @@ class MainWindow(QMainWindow):
                     source_index = source_model.index(int(row), 0)
                     proxy_index = proxy_model.mapFromSource(source_index)
                     if proxy_index.isValid():
-                        proxy_model.dataChanged.emit(proxy_index, proxy_index)
+                        proxy_model.dataChanged.emit(proxy_index, proxy_index, list(roles) if roles is not None else [])
                         updated_proxy_rects.append(proxy_index)
                 except Exception:
                     continue

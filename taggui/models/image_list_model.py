@@ -1768,6 +1768,7 @@ class HistoryItem:
     image_snapshots: list[dict[str, Any]] | None = None
     ideogram_sidecar_snapshots: list[dict[str, Any]] | None = None
     created_at_ns: int = field(default_factory=time.monotonic_ns)
+    data_change_roles: tuple[int, ...] | None = None
 
 
 class Scope(str, Enum):
@@ -8826,6 +8827,8 @@ class ImageListModel(QAbstractListModel):
         image: Image | None,
         action_name: str,
         should_ask_for_confirmation: bool,
+        *,
+        data_change_roles: tuple[int, ...] | None = None,
     ):
         """Add a lightweight undo snapshot for a single image."""
         if image is None:
@@ -8841,6 +8844,7 @@ class ImageListModel(QAbstractListModel):
                 'path': self._history_image_key(image),
                 'state': self._capture_history_image_state(image),
             }],
+            data_change_roles=data_change_roles,
         ))
         self.redo_stack.clear()
         self.update_undo_and_redo_actions_requested.emit()
@@ -8850,6 +8854,8 @@ class ImageListModel(QAbstractListModel):
         images: list[Image],
         action_name: str,
         should_ask_for_confirmation: bool,
+        *,
+        data_change_roles: tuple[int, ...] | None = None,
     ):
         """Add a lightweight undo snapshot for one or more images."""
         valid_images = [image for image in images if image is not None]
@@ -8866,6 +8872,7 @@ class ImageListModel(QAbstractListModel):
                 'path': self._history_image_key(image),
                 'state': self._capture_history_image_state(image),
             } for image in valid_images],
+            data_change_roles=data_change_roles,
         ))
         self.redo_stack.clear()
         self.update_undo_and_redo_actions_requested.emit()
@@ -9812,12 +9819,15 @@ class ImageListModel(QAbstractListModel):
                     history_item.should_ask_for_confirmation,
                     image_snapshots=reverse_snapshots,
                     created_at_ns=history_item.created_at_ns,
+                    data_change_roles=history_item.data_change_roles,
                 ))
             if changed_image_indices:
                 changed_image_indices = sorted(set(changed_image_indices))
                 self.dataChanged.emit(
                     self.index(changed_image_indices[0]),
                     self.index(changed_image_indices[-1]),
+                    list(history_item.data_change_roles)
+                    if history_item.data_change_roles is not None and not filter_membership_changed else [],
                 )
             if (
                 filter_membership_changed

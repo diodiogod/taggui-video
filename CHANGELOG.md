@@ -5,6 +5,12 @@ All notable changes to TagGUI Video 1M are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.8.3] - 2026-11-16
+
+### Fixed
+
+- Preserve zoom and pan when moving or replacing stickers in the main and floating viewers, including undo and redo.
+
 ## [1.8.2] - 2026-11-16
 
 ### Added
