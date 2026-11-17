@@ -8202,7 +8202,9 @@ class MainWindow(QMainWindow):
         _log_ui_load_stage('sort-state-ready')
         self._save_folder_view_preferences()
 
-        if self._current_directory_load_options is not None:
+        # A full reload already checks additions and removals. Starting another
+        # additions check here can reload again before that validation runs.
+        if self._current_directory_load_options is not None and not force_background_validation:
             self._schedule_auto_refresh_new_media_after_limited_load(
                 load_session_id=load_session_id,
             )
@@ -8748,7 +8750,7 @@ class MainWindow(QMainWindow):
                 )
 
         view.layout_ready.connect(do_scroll)
-        QTimer.singleShot(2000, do_scroll)
+        QTimer.singleShot(2000, view, do_scroll)
 
     def _reload_directory_from_state(
         self,
@@ -8838,7 +8840,7 @@ class MainWindow(QMainWindow):
             if getattr(self.image_list_model, '_active_load_options', None) is not None
             else self._startup_delay_ms('TAGGUI_REFRESH_SORT_REPLAY_DELAY_MS', 1000)
         )
-        QTimer.singleShot(replay_delay_ms, _replay_current_sort)
+        QTimer.singleShot(replay_delay_ms, self, _replay_current_sort)
 
     def _log_new_media_refresh_message(self, message: str):
         """Emit refresh diagnostics without creating UI chrome."""

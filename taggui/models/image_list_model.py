@@ -7564,6 +7564,7 @@ class ImageListModel(QAbstractListModel):
                 return
             if (
                 normalized_load_options is not None
+                and not force_background_validation
                 and os.getenv('TAGGUI_SKIP_LIMITED_VALIDATION', '0') == '1'
             ):
                 print("[CACHE] Skipping limited-mode background validation")

@@ -43,6 +43,48 @@ def make_image(path):
     assert image.save(str(path), 'PNG')
 
 
+@pytest.mark.parametrize('skip_routine_validation', [False, True])
+def test_limited_startup_reconciles_removal_on_one_reload(
+    tmp_path, monkeypatch, skip_routine_validation,
+):
+    from utils.image_index_db import ImageIndexDB
+    from utils.load_options import LimitedLoadOptions
+
+    # Keep the missing item outside the visible page so only the folder scan
+    # can discover it, as happens when a large folder opens in limited mode.
+    kept = tmp_path / 'b.png'
+    removed = tmp_path / 'z.png'
+    added = tmp_path / 'a.png'
+    make_image(kept)
+    make_image(removed)
+    db = ImageIndexDB(tmp_path)
+    try:
+        db.bulk_insert_files([kept, removed], tmp_path)
+        db.replace_directory_signatures({'': 1.0})
+    finally:
+        db.close()
+    removed.unlink()
+    make_image(added)
+    monkeypatch.setenv('TAGGUI_SKIP_LIMITED_VALIDATION', str(int(skip_routine_validation)))
+    monkeypatch.setenv('TAGGUI_LIMITED_AUTO_NEW_MEDIA_REFRESH_DELAY_MS', '0')
+    monkeypatch.setenv('TAGGUI_LIMITED_VALIDATION_DELAY_MS', '1200')
+    options = LimitedLoadOptions(1, 'name', 'ASC')
+    window = MainWindow(APP, startup_directory=tmp_path, startup_load_options=options)
+    applied = []
+    model = window.image_list_model
+    model.background_validation_applied.connect(applied.append)
+    try:
+        window.show()
+        pump(lambda: bool(applied) or window._load_session_id > 2, seconds=12)
+        assert window._load_session_id == 2
+        assert [(r['added_count'], r['removed_count']) for r in applied] == [(1, 1)]
+        assert set(model._db.get_all_paths()) == {kept.name, added.name}
+        assert model._db.get_limited_paths(options) == [added.name]
+        pump(lambda: model.rowCount() == 1 and model.get_loaded_row_for_path(added) == 0)
+    finally:
+        dispose_window(window)
+
+
 def dispose_window(window):
     view = window.image_list.list_view
     executors = [view._masonry_executor]
