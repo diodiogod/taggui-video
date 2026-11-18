@@ -106,25 +106,9 @@ try:
 except Exception:
     pass
 
-try:
-    from PySide6.QtGui import QImageReader, QSurfaceFormat
-    from PySide6.QtWidgets import QApplication, QMessageBox
-    from PySide6.QtCore import Qt, QLibraryInfo, QTimer, qInstallMessageHandler
-
-    from utils.settings import settings
-    from utils.load_options import LimitedLoadOptions
-    from utils.diagnostic_logging import append_text_log
-    from utils.instance_relay import (
-        OpenRequestRelay,
-        build_instance_server_name,
-        forget_preferred_server_name,
-        preferred_server_name,
-        send_open_request,
-    )
-    from widgets.main_window import MainWindow
-except Exception as e:
+def _report_import_failure(error):
     ts = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-    import_details = str(e) + "\n" + traceback.format_exc()
+    import_details = str(error) + "\n" + traceback.format_exc()
     try:
         with open(IMPORT_CRASH_LOG_PATH, 'w', encoding='utf-8') as f:
             f.write(import_details)
@@ -156,6 +140,25 @@ except Exception as e:
         except Exception:
             pass
     sys.exit(1)
+
+
+try:
+    from PySide6.QtGui import QImageReader, QSurfaceFormat
+    from PySide6.QtWidgets import QApplication, QMessageBox
+    from PySide6.QtCore import Qt, QLibraryInfo, QTimer, qInstallMessageHandler
+
+    from utils.settings import settings
+    from utils.load_options import LimitedLoadOptions
+    from utils.diagnostic_logging import append_text_log
+    from utils.instance_relay import (
+        OpenRequestRelay,
+        build_instance_server_name,
+        forget_preferred_server_name,
+        preferred_server_name,
+        send_open_request,
+    )
+except Exception as error:
+    _report_import_failure(error)
 
 
 # Install a message handler to suppress QPainter warnings at Qt level
@@ -462,8 +465,35 @@ def run_gui(argv: list[str] | None = None):
         elapsed_ms = (time.perf_counter() - startup_origin) * 1000.0
         print(f"[STARTUP] {label}: {elapsed_ms:.0f}ms")
 
-    _configure_qt_graphics_stack()
     startup_directory, startup_select_path, reuse_instance, startup_load_options = _parse_startup_launch_args(argv)
+    target_server_name = (
+        preferred_server_name()
+        if reuse_instance and startup_directory is not None and startup_load_options is None
+        else ''
+    )
+
+    def _forward_request():
+        if send_open_request(
+            server_name=target_server_name,
+            directory_path=startup_directory,
+            select_path=startup_select_path,
+        ):
+            return True
+        forget_preferred_server_name(target_server_name)
+        return False
+
+    if target_server_name and sys.platform == 'win32':
+        # The blocking Windows named-pipe client works before QApplication.
+        # Other Qt platforms keep the established post-application handoff.
+        if _forward_request():
+            return 0
+        target_server_name = ''
+
+    try:
+        from widgets.main_window import MainWindow
+    except Exception as error:
+        _report_import_failure(error)
+    _configure_qt_graphics_stack()
     _log_startup("args-ready")
     print(
         "[STARTUP] Qt startup env: "
@@ -506,15 +536,8 @@ def run_gui(argv: list[str] | None = None):
     QImageReader.setAllocationLimit(0)
     _log_startup("image-reader-ready")
 
-    if reuse_instance and startup_directory is not None and startup_load_options is None:
-        target_server_name = preferred_server_name()
-        if send_open_request(
-            server_name=target_server_name,
-            directory_path=startup_directory,
-            select_path=startup_select_path,
-        ):
-            return 0
-        forget_preferred_server_name(target_server_name)
+    if target_server_name and _forward_request():
+        return 0
 
     relay_server_name = build_instance_server_name()
     relay = OpenRequestRelay(relay_server_name, parent=app)

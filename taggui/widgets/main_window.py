@@ -8875,6 +8875,7 @@ class MainWindow(QMainWindow):
         )
         QTimer.singleShot(
             delay_ms,
+            self,
             lambda expected_load_id=int(load_session_id): self._run_auto_refresh_new_media_after_limited_load(
                 expected_load_id
             ),
@@ -8882,6 +8883,8 @@ class MainWindow(QMainWindow):
 
     def _run_auto_refresh_new_media_after_limited_load(self, expected_load_id: int):
         """Run the additions-only refresh if the same limited load session is still current."""
+        if self._main_window_closing:
+            return
         if int(expected_load_id) != int(self._load_session_id):
             return
         if int(self._pending_auto_new_media_refresh_load_id) != int(expected_load_id):
@@ -9850,10 +9853,12 @@ class MainWindow(QMainWindow):
         refresh_new_media_action = getattr(self.menu_manager, 'refresh_new_media_only_action', None)
         if refresh_new_media_action is not None:
             refresh_new_media_action.setDisabled(True)
-        QTimer.singleShot(50, self._begin_refresh_new_media_only)
+        QTimer.singleShot(50, self, self._begin_refresh_new_media_only)
 
     @Slot()
     def _begin_refresh_new_media_only(self):
+        if self._main_window_closing:
+            return
         pending_state = self._pending_new_media_refresh_state or {}
         target = pending_state.get('target') or self._resolve_refresh_new_media_target()
         expected_browser = str(pending_state.get('browser_name') or 'primary')
@@ -9895,6 +9900,8 @@ class MainWindow(QMainWindow):
 
     @Slot(dict)
     def _on_new_media_refresh_finished(self, refresh_stats: dict):
+        if self._main_window_closing:
+            return
         if self._native_qt_drag_active():
             # QDrag.exec() pumps a nested Windows message loop. Applying this
             # result resets buffered model rows, so wait until OLE releases the
@@ -9902,6 +9909,7 @@ class MainWindow(QMainWindow):
             deferred_stats = dict(refresh_stats or {})
             QTimer.singleShot(
                 50,
+                self,
                 lambda stats=deferred_stats: self._on_new_media_refresh_finished(stats),
             )
             return
@@ -9967,10 +9975,13 @@ class MainWindow(QMainWindow):
 
         if refresh_stats.get('requires_full_reload', False):
             removed_count = int(refresh_stats.get('removed_count', 0) or 0)
-            self._log_new_media_refresh_message(
-                f"Detected {removed_count:,} removed or renamed {pluralize('file', removed_count)}. "
-                "Running full reload instead."
-            )
+            if refresh_stats.get('error'):
+                self._log_new_media_refresh_message("New media check failed. Running full reload instead.")
+            else:
+                self._log_new_media_refresh_message(
+                    f"Detected {removed_count:,} removed or renamed {pluralize('file', removed_count)}. "
+                    "Running full reload instead."
+                )
             if browser_name == 'secondary':
                 secondary = getattr(self, '_secondary_browser', None)
                 if secondary is not None and expected_directory:

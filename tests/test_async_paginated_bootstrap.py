@@ -14,6 +14,7 @@ sys.path.insert(0, str(TAGGUI_ROOT))
 from PySide6.QtCore import QTimer
 from PySide6.QtWidgets import QApplication
 
+from qt_test_helpers import dispose_qobject
 from models import image_list_model as image_list_model_module
 from models.image_list_model import ImageListModel
 from utils.image import Image
@@ -356,8 +357,8 @@ def test_background_validation_apply_waits_for_native_drag(monkeypatch):
         calls = []
 
         @staticmethod
-        def singleShot(delay, callback):
-            TimerSpy.calls.append((delay, callback))
+        def singleShot(delay, context, callback):
+            TimerSpy.calls.append((delay, context, callback))
 
     monkeypatch.setattr(image_list_model_module, 'QTimer', TimerSpy)
     model._native_qt_drag_active = True
@@ -370,7 +371,7 @@ def test_background_validation_apply_waits_for_native_drag(monkeypatch):
         assert model._pending_path_validation_result == {'generation': 1}
         assert model._path_validation_drag_retry_pending is True
         assert len(TimerSpy.calls) == 1
-        assert TimerSpy.calls[0][0] == 50
+        assert TimerSpy.calls[0][:2] == (50, model)
 
         applied = []
         monkeypatch.setattr(
@@ -379,7 +380,7 @@ def test_background_validation_apply_waits_for_native_drag(monkeypatch):
             lambda: applied.append(True),
         )
         model._native_qt_drag_active = False
-        TimerSpy.calls[0][1]()
+        TimerSpy.calls[0][2]()
 
         assert model._path_validation_drag_retry_pending is False
         assert applied == [True]
@@ -387,3 +388,77 @@ def test_background_validation_apply_waits_for_native_drag(monkeypatch):
         model.shutdown_background_workers()
         model.deleteLater()
         app.processEvents()
+
+
+def test_late_obsolete_validation_does_not_displace_current_result(tmp_path, monkeypatch):
+    model = ImageListModel(256, ', ')
+    model._path_validation_generation = 7
+    current = {'generation': 7, 'directory_path': tmp_path}
+    obsolete = {'generation': 6, 'directory_path': tmp_path / 'previous'}
+    deliveries = []
+
+    class DeliverySpy:
+        @staticmethod
+        def invokeMethod(*args):
+            deliveries.append(args)
+
+    monkeypatch.setattr(image_list_model_module, 'QMetaObject', DeliverySpy)
+    try:
+        model._queue_path_validation_result(current)
+        model._queue_path_validation_result(obsolete)
+        assert model._pending_path_validation_result == current
+        assert len(deliveries) == 1
+    finally:
+        model.shutdown_background_workers()
+        dispose_qobject(model)
+
+
+def test_additions_refresh_does_not_read_paths_until_directory_changes(tmp_path, monkeypatch):
+    import sqlite3
+    import pytest
+    from utils.image_index_db import ImageIndexDB
+
+    db = ImageIndexDB(tmp_path)
+    model = ImageListModel(256, ', ')
+    read_paths = []
+    original_get_all_paths = ImageIndexDB.get_all_paths
+
+    def record_paths(index, **kwargs):
+        read_paths.append(index.db_path)
+        return original_get_all_paths(index, **kwargs)
+
+    monkeypatch.setattr(ImageIndexDB, 'get_all_paths', record_paths)
+    snapshot = dict(generation=1, filter_sql='', filter_bindings=(), loaded_pages_snapshot=(),
+                    sort_field='mtime', sort_dir='DESC', random_seed=0)
+    try:
+        db.replace_directory_signatures({'': tmp_path.stat().st_mtime})
+        same = model._compute_new_media_refresh_result(tmp_path, **snapshot)
+        assert same['changed_root_count'] == 0
+        assert read_paths == []
+
+        (tmp_path / 'added.png').touch()
+        db.replace_directory_signatures({'': 1.0})
+        with db.conn:
+            db.conn.execute("""
+                CREATE TRIGGER reject_addition BEFORE INSERT ON images
+                BEGIN SELECT RAISE(ABORT, 'simulated insert failure'); END
+            """)
+        with pytest.raises(sqlite3.IntegrityError, match='simulated insert failure'):
+            model._compute_new_media_refresh_result(tmp_path, **snapshot)
+        assert db.get_directory_signatures() == {'': 1.0}
+        assert original_get_all_paths(db) == []
+        with db.conn:
+            db.conn.execute('DROP TRIGGER reject_addition')
+
+        changed = model._compute_new_media_refresh_result(tmp_path, **snapshot)
+        assert changed['added_count'] == 1
+        assert read_paths == [db.db_path, db.db_path]
+        assert original_get_all_paths(db) == ['added.png']
+
+        rerun = model._compute_new_media_refresh_result(tmp_path, **snapshot)
+        assert rerun['changed_root_count'] == 0
+        assert read_paths == [db.db_path, db.db_path]
+    finally:
+        db.close()
+        model.shutdown_background_workers()
+        dispose_qobject(model)

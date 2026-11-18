@@ -34,6 +34,30 @@ from utils.caption_annotations import caption_attention_counts, normalize_captio
 
 DB_VERSION = 11  # v11 adds structured review-mark persistence
 ORDER_CACHE_VERSION = 3  # revision-owned, compact ordered views
+_MIGRATABLE_DB_VERSIONS = frozenset({6, 7, 8, 9, 10})
+
+
+class UnsupportedIndexVersion(Exception):
+    """The folder index requires a compatible TagGUI version."""
+
+
+def _check_index_version(conn):
+    if not conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'meta'"
+    ).fetchone():
+        return
+    row = conn.execute("SELECT value FROM meta WHERE key = 'version'").fetchone()
+    if row is None:
+        return
+    try:
+        version = int(row[0])
+    except (TypeError, ValueError):
+        version = None
+    if version is None or not 1 <= version <= DB_VERSION:
+        raise UnsupportedIndexVersion(
+            f"This folder uses index version {row[0]!r}, which this TagGUI build "
+            "cannot open. Open the folder with a compatible version of TagGUI."
+        )
 
 
 def _mapping_value(mapping: Any, key: str, default: Any = None) -> Any:
@@ -359,6 +383,7 @@ class ImageIndexDB:
         self.db_path = self.db_base_path(self._directory_path)
         self.legacy_db_path = self.legacy_db_base_path(self._directory_path)
         self.conn = None
+        self.schema_error: str | None = None
         self._order_cache_signature = None
         self._filter_tokenizer = None
         self._filter_query_state = threading.local()
@@ -383,7 +408,7 @@ class ImageIndexDB:
 
     def _ensure_connection(self):
         """Ensure database connection is open and active."""
-        if not self.enabled: return False
+        if not self.enabled or self.schema_error: return False
         with self._db_lock:
             try:
                 if self.conn:
@@ -660,6 +685,7 @@ class ImageIndexDB:
             with ImageIndexDB._init_lock:
                 self._prepare_db_location()
                 self.conn = sqlite3.connect(str(self.db_path), timeout=60.0, check_same_thread=False)  # Increased timeout for migrations
+                _check_index_version(self.conn)
                 self.conn.row_factory = sqlite3.Row  # Access columns by name
                 self._register_filter_functions()
 
@@ -816,7 +842,7 @@ class ImageIndexDB:
                     self.conn.commit()
                 elif int(row['value']) != DB_VERSION:
                     old_version = int(row['value'])
-                    if old_version in (6, 7, 8, 9, 10) and DB_VERSION == 11:
+                    if old_version in _MIGRATABLE_DB_VERSIONS:
                         print(f'Database version mismatch (v{old_version} -> v{DB_VERSION}), migrating incrementally...')
                         if old_version <= 6:
                             self._create_image_markings_schema(cursor)
@@ -846,7 +872,7 @@ class ImageIndexDB:
                                      (str(DB_VERSION), 'version'))
                         self.conn.commit()
                     else:
-                        # Version mismatch, drop and recreate tables (schema changed)
+                        # Recognized legacy cache versions require the existing rebuild.
                         print(f'Database version mismatch (v{row["value"]} -> v{DB_VERSION}), recreating tables...')
                         cursor.execute('DROP TABLE IF EXISTS image_markings')
                         cursor.execute('DROP TABLE IF EXISTS images')
@@ -985,6 +1011,12 @@ class ImageIndexDB:
                 self._create_order_view_schema(self.conn.cursor())
                 self.conn.commit()
 
+        except UnsupportedIndexVersion as e:
+            if self.conn is not None:
+                self.conn.close()
+                self.conn = None
+            self.schema_error = str(e)
+            print(f'[DB] {self.schema_error}')
         except sqlite3.Error as e:
             print(f'Failed to initialize database: {e}')
             if self.conn:
@@ -1023,6 +1055,19 @@ class ImageIndexDB:
         legacy_bundle = [path for path in self.bundle_paths_for_base(self.legacy_db_path) if path.exists()]
         if not legacy_bundle:
             return
+
+        # Check the root-level index before moving its SQLite bundle.
+        if self.legacy_db_path.exists():
+            legacy = sqlite3.connect(self.legacy_db_path.resolve().as_uri() + '?mode=ro', uri=True)
+            try:
+                _check_index_version(legacy)
+            except sqlite3.DatabaseError as error:
+                # Let the normal initialization path handle a corrupt legacy DB
+                # after its bundle has been moved to the current location.
+                if error.sqlite_errorcode not in (sqlite3.SQLITE_CORRUPT, sqlite3.SQLITE_NOTADB):
+                    raise
+            finally:
+                legacy.close()
 
         moved_any = False
         legacy_base_name = self.legacy_db_path.name
@@ -1327,6 +1372,18 @@ class ImageIndexDB:
         if new_files_count > 0:
              print(f"[DB] Bulk inserted {new_files_count:,} new files")
 
+    @staticmethod
+    def _relative_path_insert_row(rel_path, directory_path, indexed_at):
+        path = directory_path / rel_path
+        stat = path.stat()
+        suffix = path.suffix.lower()
+        return (
+            rel_path, None, None, 1.0,
+            int(suffix in {'.mp4', '.avi', '.mov', '.mkv', '.webm'}),
+            None, None, None, stat.st_mtime, 0.0, indexed_at,
+            stat.st_size, suffix.lstrip('.'), stat.st_ctime,
+        )
+
     def bulk_insert_relative_paths(self, rel_paths: List[str], directory_path: Path,
                                    progress_callback=None):
         """
@@ -1344,26 +1401,9 @@ class ImageIndexDB:
 
         for i, rel_path in enumerate(rel_paths):
             try:
-                full_path = directory_path / rel_path
-                stat = full_path.stat()
-                mtime = stat.st_mtime
-                ctime = stat.st_ctime
-                file_size = stat.st_size
-            except (OSError, FileNotFoundError, ValueError):
+                files_data.append(self._relative_path_insert_row(rel_path, directory_path, now))
+            except (OSError, ValueError):
                 continue
-
-            suffix = full_path.suffix.lower()
-            is_video = suffix in ['.mp4', '.avi', '.mov', '.mkv', '.webm']
-            file_type = suffix.lstrip('.') if suffix else ''
-
-            files_data.append((
-                rel_path,
-                None, None, 1.0,  # Placeholder dims
-                int(is_video),
-                None, None, None,  # Video metadata
-                mtime, 0.0, now,
-                file_size, file_type, ctime
-            ))
             new_files_count += 1
 
             if len(files_data) >= 5000:
@@ -1378,6 +1418,34 @@ class ImageIndexDB:
 
         if new_files_count > 0:
             print(f"[DB] Bulk inserted {new_files_count:,} new files")
+
+    def apply_directory_path_changes(self, added_paths, removed_paths, dir_mtimes):
+        """Commit a scanned path delta and its signatures as a single update."""
+        now = time.time()
+        # Stat before starting the write transaction. A path that has already
+        # changed invalidates the scan and must leave its signatures retryable.
+        rows = [
+            self._relative_path_insert_row(path, self._directory_path, now)
+            for path in added_paths
+        ]
+        with self._db_lock:
+            if not self._ensure_connection():
+                raise sqlite3.OperationalError("Folder index is unavailable")
+            with self.conn:
+                cursor = self.conn.cursor()
+                cursor.execute('BEGIN IMMEDIATE')
+                removed = self._delete_image_rows(cursor, removed_paths)
+                inserted = self._insert_image_rows(cursor, rows, strict=True) if rows else 0
+                if removed or inserted:
+                    cursor.execute('DELETE FROM ordered_image_cache')
+                self._write_directory_signatures(cursor, dir_mtimes)
+            if removed or inserted:
+                self._order_cache_signature = None
+        if removed:
+            print(f'[DB] Removed {removed:,} deleted images from index.')
+        if inserted:
+            print(f'[DB] Bulk inserted {inserted:,} new files')
+        return inserted, removed
 
 
     def run_maintenance(self, directory_path: Path):
@@ -2624,20 +2692,25 @@ class ImageIndexDB:
         return migrated_total, scanned_sidecars, done
 
 
+    @staticmethod
+    def _insert_image_rows(cursor, rows, *, strict=False):
+        insert = 'INSERT' if strict else 'INSERT OR IGNORE'
+        on_conflict = 'ON CONFLICT(file_name) DO NOTHING' if strict else ''
+        return execute_insert_batches(cursor, f'''
+            {insert} INTO images
+            (file_name, width, height, aspect_ratio, is_video, video_fps,
+             video_duration, video_frame_count, mtime, rating, indexed_at,
+             file_size, file_type, ctime)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            {on_conflict}
+        ''', rows)
+
     def _bulk_insert_chunk(self, data_chunk):
         """Helper to insert a chunk of data."""
         with self._db_lock:
             try:
-                before_changes = self.conn.total_changes
                 cursor = self.conn.cursor()
-                execute_insert_batches(cursor, '''
-                    INSERT OR IGNORE INTO images
-                    (file_name, width, height, aspect_ratio, is_video, video_fps,
-                     video_duration, video_frame_count, mtime, rating, indexed_at,
-                     file_size, file_type, ctime)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                ''', data_chunk)
-                inserted = self.conn.total_changes > before_changes
+                inserted = self._insert_image_rows(cursor, data_chunk)
                 if inserted:
                     cursor.execute('DELETE FROM ordered_image_cache')
                 self.conn.commit()
@@ -3770,9 +3843,11 @@ class ImageIndexDB:
             print(f'Database path-ID query error: {e}')
             return {}
 
-    def get_all_paths(self) -> List[str]:
+    def get_all_paths(self, *, raise_errors=False) -> List[str]:
         """Get all cached file paths (for fast reboot without rescanning)."""
         if not self.enabled or not self.conn:
+            if raise_errors:
+                raise sqlite3.OperationalError("Folder index is unavailable")
             return []
 
         try:
@@ -3780,6 +3855,8 @@ class ImageIndexDB:
             cursor.execute('SELECT file_name FROM images')
             return [row[0] for row in cursor.fetchall()]
         except sqlite3.Error:
+            if raise_errors:
+                raise
             return []
 
     def get_meta_value(self, key: str, default: Optional[str] = None) -> Optional[str]:
@@ -3837,31 +3914,24 @@ class ImageIndexDB:
         except sqlite3.Error:
             return {}
 
+    @staticmethod
+    def _write_directory_signatures(cursor, dir_mtimes):
+        cursor.execute('DELETE FROM directories')
+        now = time.time()
+        cursor.executemany(
+            'INSERT INTO directories (dir_path, mtime, scanned_at) VALUES (?, ?, ?)',
+            [(str(path).replace('\\', '/'), float(mtime), now)
+             for path, mtime in sorted(dir_mtimes.items())],
+        )
+
     def replace_directory_signatures(self, dir_mtimes: Dict[str, float]):
         """Replace the persisted directory signature snapshot."""
         if not self._ensure_connection():
             return
 
         try:
-            with self._db_lock:
-                cursor = self.conn.cursor()
-                cursor.execute('DELETE FROM directories')
-
-                if dir_mtimes:
-                    now = time.time()
-                    rows = [
-                        (str(dir_path).replace('\\', '/'), float(mtime), now)
-                        for dir_path, mtime in sorted(dir_mtimes.items())
-                    ]
-                    cursor.executemany(
-                        '''
-                        INSERT INTO directories (dir_path, mtime, scanned_at)
-                        VALUES (?, ?, ?)
-                        ''',
-                        rows,
-                    )
-
-                self.conn.commit()
+            with self._db_lock, self.conn:
+                self._write_directory_signatures(self.conn.cursor(), dir_mtimes)
         except sqlite3.Error as e:
             print(f'Database directory signature write error: {e}')
 
@@ -4270,6 +4340,28 @@ class ImageIndexDB:
 
         return updated_total, processed_total, wrapped
 
+    @staticmethod
+    def _delete_image_rows(cursor, rel_paths):
+        removed = 0
+        # Bound parameters for each statement, including index cleanup.
+        batch_size = min(1000, cursor.connection.getlimit(sqlite3.SQLITE_LIMIT_VARIABLE_NUMBER))
+        for index in range(0, len(rel_paths), batch_size):
+            paths = rel_paths[index:index + batch_size]
+            placeholders = ','.join('?' for _ in paths)
+            ids = [
+                row[0] for row in cursor.execute(
+                    f'SELECT id FROM images WHERE file_name IN ({placeholders})', paths
+                )
+            ]
+            if not ids:
+                continue
+            id_ph = ','.join('?' for _ in ids)
+            for table in ('image_tags', 'image_markings', 'image_ideogram_captions', 'image_ideogram_terms'):
+                cursor.execute(f'DELETE FROM {table} WHERE image_id IN ({id_ph})', ids)
+            cursor.execute(f'DELETE FROM images WHERE id IN ({id_ph})', ids)
+            removed += cursor.rowcount
+        return removed
+
     def remove_images_by_paths(self, rel_paths: list):
         """Remove images (and their tags) from the DB by relative path."""
         if not self.enabled or not self.conn or not rel_paths:
@@ -4277,30 +4369,14 @@ class ImageIndexDB:
         with self._db_lock:
             try:
                 cursor = self.conn.cursor()
-                placeholders = ','.join('?' for _ in rel_paths)
-                # Get IDs first for tag cleanup
-                cursor.execute(
-                    f'SELECT id FROM images WHERE file_name IN ({placeholders})',
-                    rel_paths
-                )
-                ids = [row[0] for row in cursor.fetchall()]
-                if ids:
-                    id_ph = ','.join('?' for _ in ids)
-                    cursor.execute(f'DELETE FROM image_tags WHERE image_id IN ({id_ph})', ids)
-                    cursor.execute(f'DELETE FROM image_markings WHERE image_id IN ({id_ph})', ids)
-                    cursor.execute(f'DELETE FROM image_ideogram_captions WHERE image_id IN ({id_ph})', ids)
-                    cursor.execute(f'DELETE FROM image_ideogram_terms WHERE image_id IN ({id_ph})', ids)
-                cursor.execute(
-                    f'DELETE FROM images WHERE file_name IN ({placeholders})',
-                    rel_paths
-                )
-                if ids:
+                removed = self._delete_image_rows(cursor, rel_paths)
+                if removed:
                     cursor.execute('DELETE FROM ordered_image_cache')
                 self.conn.commit()
-                if ids:
+                if removed:
                     self._order_cache_signature = None
-                    print(f'[DB] Removed {len(ids)} deleted images from index.')
-                return len(ids)
+                    print(f'[DB] Removed {removed} deleted images from index.')
+                return removed
             except Exception as e:
                 try:
                     self.conn.rollback()

@@ -1,5 +1,6 @@
 """Cold Explorer-style startup must keep delivering native Qt input while scanning."""
 import sys
+import shutil
 import threading
 import time
 import traceback
@@ -82,6 +83,125 @@ def test_limited_startup_reconciles_removal_on_one_reload(
         assert model._db.get_limited_paths(options) == [added.name]
         pump(lambda: model.rowCount() == 1 and model.get_loaded_row_for_path(added) == 0)
     finally:
+        dispose_window(window)
+
+
+def test_close_cached_folder_before_deferred_validation(tmp_path, monkeypatch):
+    from utils.image_index_db import ImageIndexDB
+    from utils.load_options import LimitedLoadOptions
+
+    path = tmp_path / 'cached.png'
+    make_image(path)
+    db = ImageIndexDB(tmp_path)
+    try:
+        db.bulk_insert_files([path], tmp_path)
+    finally:
+        db.close()
+    monkeypatch.setenv('TAGGUI_LIMITED_VALIDATION_DELAY_MS', '350')
+    monkeypatch.setenv('TAGGUI_LIMITED_AUTO_NEW_MEDIA_REFRESH_DELAY_MS', '350')
+    monkeypatch.setenv('TAGGUI_SKIP_LIMITED_VALIDATION', '0')
+    monkeypatch.setenv('TAGGUI_DISABLE_LIMITED_AUTO_NEW_MEDIA_REFRESH', '0')
+    window = MainWindow(APP, startup_directory=tmp_path, startup_load_options=LimitedLoadOptions(1))
+    try:
+        window.show()
+        pump(lambda: window.image_list_model.rowCount() == 1)
+        window.close()
+        # The window is still alive here, so shutdown must prevent submitting
+        # work even before Qt destroys the native context for these timers.
+        QTest.qWait(500)
+    finally:
+        dispose_window(window)
+
+
+@pytest.mark.parametrize('cancel_probe', [False, True])
+def test_stale_selected_video_probe_keeps_qt_responsive(tmp_path, monkeypatch, cancel_probe):
+    from utils.image_index_db import ImageIndexDB
+
+    if not shutil.which('ffprobe'):
+        pytest.skip('ffprobe is required for the generated video fixture')
+    import cv2
+    import numpy as np
+
+    path = tmp_path / 'selected.avi'
+    writer = cv2.VideoWriter(str(path), cv2.VideoWriter_fourcc(*'MJPG'), 24, (64, 48))
+    assert writer.isOpened()
+    try:
+        for _ in range(8):
+            writer.write(np.full((48, 64, 3), 127, np.uint8))
+    finally:
+        writer.release()
+    db = ImageIndexDB(tmp_path)
+    try:
+        db.save_info(path.name, 32, 32, True, path.stat().st_mtime - 10,
+                     rating=.8, file_size=1)
+        db.commit()
+    finally:
+        db.close()
+
+    # Verify Qt makes progress while the selected video's probe is in flight.
+    # The fixture still uses the real probe and decode on the worker.
+    settings.setValue('main_viewer_visible', False)
+    started, release, finished = threading.Event(), threading.Event(), threading.Event()
+    extractor = model_module.extract_video_info
+    main_thread = threading.get_ident()
+    threads = []
+
+    def gated_extract(selected_path):
+        if selected_path == path and not started.is_set():
+            threads.append(threading.get_ident())
+            started.set()
+            try:
+                if not release.wait(3):
+                    return None, None, None
+                return extractor(selected_path)
+            finally:
+                finished.set()
+        return extractor(selected_path)
+
+    def release_probe():
+        if not started.is_set() or release.is_set():
+            return
+        if cancel_probe:
+            dialog = APP.activeModalWidget()
+            if not isinstance(dialog, QProgressDialog) or dialog.windowTitle() != 'Checking Selected Video':
+                return
+            button = dialog.findChild(QPushButton)
+            if button is None or not button.isVisible():
+                return
+            QTest.mouseClick(button, Qt.LeftButton)
+        release.set()
+
+    monkeypatch.setattr(model_module, 'extract_video_info', gated_extract)
+    timer = QTimer()
+    timer.setInterval(10)
+    timer.timeout.connect(release_probe)
+    window = MainWindow(APP, startup_directory=tmp_path, startup_select_path=str(path))
+    try:
+        timer.start()
+        window.show()
+        model = window.image_list_model
+        pump(lambda: release.is_set() and not model._directory_load_in_progress, seconds=12)
+        assert threads and threads[0] != main_thread
+        if cancel_probe:
+            assert window.directory_path is None
+            unchanged = ImageIndexDB(tmp_path)
+            try:
+                row = unchanged.get_image_by_id(unchanged.get_image_id(path.name))
+                assert (row['width'], row['height'], row['rating']) == (32, 32, .8)
+            finally:
+                unchanged.close()
+            return
+        assert window.directory_path == tmp_path
+        pump(lambda: model.get_loaded_row_for_path(path) >= 0)
+        info = model._db.get_cached_info(path.name, path.stat().st_mtime, path.stat().st_size)
+        assert info['dimensions'] == (64, 48)
+        assert info['video_metadata']['frame_count'] == 8
+        assert info['rating'] == .8
+    finally:
+        release.set()
+        timer.stop()
+        if started.is_set():
+            assert finished.wait(6)
         dispose_window(window)
 
 

@@ -321,12 +321,20 @@ assert "utils.video.frame_editor" not in sys.modules
 
 
 def test_playback_backend_import_does_not_probe_optional_runtimes():
-    from utils.video import playback_backend
-
-    assert playback_backend.MPV_PYTHON_MODULE is None
-    assert playback_backend.VLC_PYTHON_MODULE is None
-    assert "mpv" not in sys.modules
-    assert "vlc" not in sys.modules
+    # Other tests intentionally open videos and load their backends. Measure
+    # the first import in a fresh interpreter, as on actual startup.
+    script = """
+import sys
+from utils.video import playback_backend
+assert playback_backend.MPV_PYTHON_MODULE is None
+assert playback_backend.VLC_PYTHON_MODULE is None
+assert "mpv" not in sys.modules
+assert "vlc" not in sys.modules
+"""
+    env = dict(os.environ, PYTHONPATH=str(TAGGUI_ROOT))
+    result = subprocess.run([sys.executable, '-c', script], cwd=ROOT, env=env,
+                            capture_output=True, text=True, timeout=20)
+    assert result.returncode == 0, result.stderr
 
 
 def test_playback_backend_uses_stable_user_facing_mpv_name():

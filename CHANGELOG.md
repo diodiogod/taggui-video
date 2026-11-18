@@ -5,6 +5,20 @@ All notable changes to TagGUI Video 1M are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.8.5] - 2026-11-17
+
+### Fixed
+
+- Opening a folder indexed by a newer TagGUI version now preserves the index and shows a compatibility message.
+- Failed folder refreshes can be retried without leaving new files missing from the browser. Late validation results no longer replace the current results or start work after shutdown.
+- Video thumbnails now load in nonpaginated folders.
+
+### Changed
+
+- Refreshing an unchanged folder skips reading every indexed path.
+- Checking stale metadata for the selected video keeps the window responsive and offers Cancel.
+- On Windows, opening a folder in an existing TagGUI window skips graphics startup in the launcher.
+
 ## [1.8.4] - 2026-11-17
 
 ### Fixed

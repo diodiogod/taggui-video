@@ -1,10 +1,12 @@
 import json
 import os
+import time
 import uuid
 from pathlib import Path
 
-from PySide6.QtCore import QObject, Signal
+from PySide6.QtCore import QObject, QTimer, Signal
 from PySide6.QtNetwork import QLocalServer, QLocalSocket
+from shiboken6 import isValid
 
 from utils.settings import settings
 
@@ -61,11 +63,14 @@ def send_open_request(
         'select_path': str(select_path) if select_path else '',
     }
     message = json.dumps(payload).encode('utf-8')
-    socket.write(message)
-    if not socket.waitForBytesWritten(timeout_ms):
-        socket.abort()
+    if socket.write(message) != len(message):
         return False
-    socket.flush()
+    deadline = time.monotonic() + timeout_ms / 1000
+    while socket.bytesToWrite() > 0:
+        remaining_ms = int((deadline - time.monotonic()) * 1000)
+        if remaining_ms <= 0 or not socket.waitForBytesWritten(remaining_ms):
+            socket.abort()
+            return False
     socket.disconnectFromServer()
     return True
 
@@ -103,25 +108,31 @@ class OpenRequestRelay(QObject):
                 continue
             self._buffers[socket] = bytearray()
             socket.readyRead.connect(lambda s=socket: self._on_ready_read(s))
-            socket.disconnected.connect(lambda s=socket: self._on_disconnected(s))
-            socket.errorOccurred.connect(lambda *_args, s=socket: self._on_disconnected(s))
+            socket.disconnected.connect(lambda s=socket: self._schedule_disconnect(s))
+            socket.errorOccurred.connect(lambda *_args, s=socket: self._schedule_disconnect(s))
+            # The sender may already have written and disconnected while Qt
+            # was delivering newConnection, before these signals were wired.
+            self._on_ready_read(socket)
+            if not isValid(socket) or socket.state() == QLocalSocket.UnconnectedState:
+                self._schedule_disconnect(socket)
+
+    def _schedule_disconnect(self, socket):
+        # A read can emit disconnected synchronously. Let that read finish
+        # appending its bytes before consuming the buffer and deleting the socket.
+        QTimer.singleShot(0, self, lambda: self._on_disconnected(socket))
 
     def _on_ready_read(self, socket: QLocalSocket):
-        try:
-            payload = bytes(socket.readAll())
-        except Exception:
-            payload = b''
-        if not payload:
-            return
-        buffer = self._buffers.setdefault(socket, bytearray())
-        buffer.extend(payload)
+        buffer = self._buffers.get(socket)
+        if buffer is not None and isValid(socket) and socket.bytesAvailable():
+            buffer.extend(bytes(socket.readAll()))
 
     def _on_disconnected(self, socket: QLocalSocket):
-        buffer = bytes(self._buffers.pop(socket, bytearray()))
-        try:
+        if socket not in self._buffers:
+            return
+        self._on_ready_read(socket)
+        buffer = bytes(self._buffers.pop(socket))
+        if isValid(socket):
             socket.deleteLater()
-        except Exception:
-            pass
         if not buffer:
             return
         try:

@@ -4736,19 +4736,6 @@ class ImageListModel(QAbstractListModel):
         try:
             _trace_new_media_refresh(self, generation, 'open-index')
             db = ImageIndexDB(directory_path)
-            self._configure_filter_db(db)
-            cached_paths = db.get_all_paths()
-            _trace_new_media_refresh(self, generation, f'group-paths count={len(cached_paths)}')
-            norm_to_cached_paths: dict[str, list[str]] = {}
-            for rel_path in cached_paths:
-                normalized = _normalize_relative_path(rel_path)
-                norm_to_cached_paths.setdefault(normalized, []).append(rel_path)
-
-            current_rel_map: dict[str, str] = {}
-            for normalized, rel_variants in norm_to_cached_paths.items():
-                current_rel_map[normalized] = sorted(set(rel_variants))[0]
-            current_rel_paths = set(current_rel_map.keys())
-
             _trace_new_media_refresh(self, generation, 'check-directories')
             stored_dir_mtimes = db.get_directory_signatures()
             if stored_dir_mtimes:
@@ -4760,6 +4747,11 @@ class ImageListModel(QAbstractListModel):
             if not changed_roots:
                 print("[REFRESH_NEW] No directory changes detected")
                 return result
+
+            self._configure_filter_db(db)
+            cached_paths = db.get_all_paths(raise_errors=True)
+            _trace_new_media_refresh(self, generation, f'group-paths count={len(cached_paths)}')
+            current_rel_paths = {_normalize_relative_path(path) for path in cached_paths}
 
             image_suffixes_string = settings.value(
                 'image_list_file_formats',
@@ -4800,7 +4792,6 @@ class ImageListModel(QAbstractListModel):
 
             added_rel_paths = sorted(refreshed_rel_paths - current_rel_paths)
             added_db_paths = [_to_native_relative_path(rel_path) for rel_path in added_rel_paths]
-            result['added_count'] = len(added_db_paths)
 
             if stored_dir_mtimes:
                 merged_dir_mtimes = {
@@ -4814,13 +4805,8 @@ class ImageListModel(QAbstractListModel):
             else:
                 merged_dir_mtimes = {}
             merged_dir_mtimes.update(refreshed_dir_mtimes)
-            db.replace_directory_signatures(merged_dir_mtimes)
-
-            if added_db_paths:
-                db.bulk_insert_relative_paths(
-                    added_db_paths,
-                    directory_path,
-                )
+            added_count, _ = db.apply_directory_path_changes(added_db_paths, [], merged_dir_mtimes)
+            result['added_count'] = added_count
 
             tag_updates_count = 0
             ideogram_updates_count = 0
@@ -4890,7 +4876,7 @@ class ImageListModel(QAbstractListModel):
 
     def start_refresh_new_media_only_async(self) -> bool:
         """Run additions-only refresh in the background."""
-        if not self._paginated_mode or not self._directory_path:
+        if self._shutdown_requested or not self._paginated_mode or not self._directory_path:
             return False
         if self._new_media_refresh_running:
             return False
@@ -5966,6 +5952,7 @@ class ImageListModel(QAbstractListModel):
         if self._shutdown_requested:
             return
         self._shutdown_requested = True
+        self.cancel_background_path_validation()
         for reader in getattr(self, '_auxiliary_count_readers', ()):
             reader.cancel()
         self._view_prepare_task.close()
@@ -6468,11 +6455,11 @@ class ImageListModel(QAbstractListModel):
                 # print(f"[DATA DEBUG] Returning None for row {row}")
                 return None
 
-            # Pagination mode: Async loading with placeholders for smooth scrolling
+            # Async loading with placeholders for paginated rows and videos.
             # _thumbnail_futures stores the future, path, and crop signature so
             # row remaps reuse work, while crop edits reject stale results.
             job_key = image.path
-            global_index = page_num * self.PAGE_SIZE + page_offset
+            global_index = page_num * self.PAGE_SIZE + page_offset if self._paginated_mode else row
             with self._thumbnail_lock:
                 # Check if already loading
                 if job_key in self._thumbnail_futures:
@@ -7017,18 +7004,19 @@ class ImageListModel(QAbstractListModel):
     def _queue_path_validation_result(self, result: dict):
         """Store a background path-validation result and apply it on the UI thread."""
         with self._path_validation_lock:
+            if self._shutdown_requested or result.get('generation') != self._path_validation_generation:
+                return
             self._pending_path_validation_result = result
-
-        QMetaObject.invokeMethod(
-            self,
-            "_apply_pending_path_validation",
-            Qt.ConnectionType.QueuedConnection,
-        )
+            QMetaObject.invokeMethod(
+                self,
+                "_apply_pending_path_validation",
+                Qt.ConnectionType.QueuedConnection,
+            )
 
     def cancel_background_path_validation(self):
         """Invalidate scheduled/in-flight folder validation before a file workflow."""
-        self._path_validation_generation += 1
         with self._path_validation_lock:
+            self._path_validation_generation += 1
             self._pending_path_validation_result = None
         self._close_background_validation_progress()
 
@@ -7096,7 +7084,7 @@ class ImageListModel(QAbstractListModel):
         if self._native_qt_drag_active:
             if not self._path_validation_drag_retry_pending:
                 self._path_validation_drag_retry_pending = True
-                QTimer.singleShot(50, self._retry_pending_path_validation_after_drag)
+                QTimer.singleShot(50, self, self._retry_pending_path_validation_after_drag)
             return
 
         with self._path_validation_lock:
@@ -7231,9 +7219,22 @@ class ImageListModel(QAbstractListModel):
             image_id = db.get_image_id(relative_path)
             if not image_id:
                 return False
-            cached_row = db.get_image_by_id(image_id) or {}
-            dimensions, video_metadata, _preview = extract_video_info(resolved_path)
+            # Finish the probe before using its mtime or dimensions for folder
+            # ordering and selection, while keeping Qt responsive during I/O.
+            self._directory_load_in_progress = True
+            try:
+                dimensions, video_metadata, _preview = run_background_operation(
+                    lambda _update, _cancelled: extract_video_info(resolved_path),
+                    title='Checking Selected Video', label=f'Checking {resolved_path.name}…',
+                    should_cancel=lambda: self._shutdown_requested,
+                )
+            finally:
+                self._directory_load_in_progress = False
             if not dimensions or not video_metadata:
+                return False
+            current = resolved_path.stat()
+            if ((current.st_mtime_ns, current.st_size) != (stat.st_mtime_ns, stat.st_size)
+                    or db.get_image_id(relative_path) != image_id):
                 return False
 
             db.save_info(
@@ -7243,7 +7244,6 @@ class ImageListModel(QAbstractListModel):
                 True,
                 stat.st_mtime,
                 video_metadata,
-                rating=float(cached_row.get('rating', 0.0) or 0.0),
                 file_size=stat.st_size,
                 file_type=resolved_path.suffix.lower(),
                 ctime=getattr(stat, 'st_ctime', stat.st_mtime),
@@ -7251,6 +7251,8 @@ class ImageListModel(QAbstractListModel):
             db.commit()
             print(f"[CACHE] Refreshed stale selected video metadata: {relative_path}")
             return True
+        except BackgroundOperationCancelled:
+            raise
         except (OSError, ValueError):
             return False
         except Exception as e:
@@ -7301,7 +7303,7 @@ class ImageListModel(QAbstractListModel):
                 return
 
             if cached_rel_paths is None:
-                cached_rel_paths = db.get_all_paths()
+                cached_rel_paths = db.get_all_paths(raise_errors=True)
 
             current_rel_map = {}
             duplicate_db_paths = []
@@ -7323,17 +7325,19 @@ class ImageListModel(QAbstractListModel):
                 if not changed_roots:
                     duplicate_db_paths = sorted(set(duplicate_db_paths))
                     if duplicate_db_paths:
-                        db.remove_images_by_paths(duplicate_db_paths)
+                        _, removed_count = db.apply_directory_path_changes(
+                            [], duplicate_db_paths, stored_dir_mtimes,
+                        )
                         print(
                             "[CACHE] Background validation: removed "
-                            f"{len(duplicate_db_paths):,} duplicate index entries"
+                            f"{removed_count:,} duplicate index entries"
                         )
                         self._queue_path_validation_result({
                             'generation': generation,
                             'directory_path': directory_path,
                             'changes_detected': True,
                             'added_count': 0,
-                            'removed_count': len(duplicate_db_paths),
+                            'removed_count': removed_count,
                             'added_db_paths': [],
                             'precomputed_rel_paths': {
                                 current_rel_map.get(rel_path, _to_native_relative_path(rel_path))
@@ -7430,12 +7434,9 @@ class ImageListModel(QAbstractListModel):
             if generation != self._path_validation_generation:
                 return
 
-            if removed_db_paths:
-                db.remove_images_by_paths(removed_db_paths)
-            if added_db_paths:
-                db.bulk_insert_relative_paths(added_db_paths, directory_path)
-
-            db.replace_directory_signatures(merged_dir_mtimes)
+            added_count, removed_count = db.apply_directory_path_changes(
+                added_db_paths, removed_db_paths, merged_dir_mtimes,
+            )
             tag_updates_count = int(
                 db.reconcile_tags_in_subtrees(
                     directory_path,
@@ -7468,8 +7469,8 @@ class ImageListModel(QAbstractListModel):
                 'generation': generation,
                 'directory_path': directory_path,
                 'changes_detected': changes_detected,
-                'added_count': len(added_rel_paths),
-                'removed_count': len(removed_db_paths),
+                'added_count': added_count,
+                'removed_count': removed_count,
                 'added_db_paths': added_db_paths,
                 'tag_updates_count': tag_updates_count,
                 'precomputed_rel_paths': merged_native_paths if changes_detected else None,
@@ -7522,15 +7523,15 @@ class ImageListModel(QAbstractListModel):
             self._directory_path = directory_path
             with self._sidecar_meta_cache_lock:
                 self._sidecar_meta_cache.clear()
-            self._path_validation_generation += 1
+            self.cancel_background_path_validation()
             load_generation = self._path_validation_generation
-            with self._path_validation_lock:
-                self._pending_path_validation_result = None
-            self._close_background_validation_progress()
 
         # Try to load file paths from DB cache first (much faster for large folders)
         from utils.image_index_db import ImageIndexDB
         db = ImageIndexDB(directory_path)
+        if db.schema_error:
+            QMessageBox.warning(QApplication.activeWindow(), 'Incompatible Folder Index', db.schema_error)
+            return False
         # A COUNT is effectively free in SQLite, while materializing 1M path
         # strings costs seconds and hundreds of MB. The paginated fast path
         # only needs the count; its deferred validator loads paths off-thread.
@@ -7555,9 +7556,11 @@ class ImageListModel(QAbstractListModel):
         )
 
         if validate_media_path is not None:
-            self._refresh_cached_video_if_stale(
-                db, directory_path, Path(validate_media_path)
-            )
+            try:
+                self._refresh_cached_video_if_stale(db, directory_path, Path(validate_media_path))
+            except BackgroundOperationCancelled:
+                db.close()
+                return False
 
         def _schedule_background_validation(delay_ms: int = 0):
             if skip_background_validation:
@@ -7571,14 +7574,15 @@ class ImageListModel(QAbstractListModel):
                 return
 
             def _start_validation():
-                if load_generation != self._path_validation_generation:
+                executor = self._load_executor
+                if self._shutdown_requested or executor is None or load_generation != self._path_validation_generation:
                     return
                 if load_generation == int(getattr(self, '_path_validation_satisfied_generation', -1) or -1):
                     print("[CACHE] Skipping background validation; index already synchronized")
                     self.background_validation_progress.emit("", -1, 0, True)
                     return
                 print("[CACHE] Starting background validation...")
-                self._load_executor.submit(
+                executor.submit(
                     self._validate_cached_paths_in_background,
                     directory_path,
                     list(cached_paths) if cached_paths is not None else None,
@@ -7589,7 +7593,7 @@ class ImageListModel(QAbstractListModel):
 
             if delay_ms > 0:
                 print(f"[CACHE] Deferring background validation by {delay_ms}ms")
-                QTimer.singleShot(int(delay_ms), _start_validation)
+                QTimer.singleShot(int(delay_ms), self, _start_validation)
             else:
                 _start_validation()
 
