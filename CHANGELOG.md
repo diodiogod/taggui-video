@@ -5,6 +5,12 @@ All notable changes to TagGUI Video 1M are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.8.6] - 2026-11-21
+
+### Fixed
+
+- During file drags, including Ctrl+Alt-drag from a workflow archive, TagGUI waits until the drag ends before reloading the viewer or rebuilding its video surface.
+
 ## [1.8.5] - 2026-11-17
 
 ### Fixed
