@@ -1,5 +1,8 @@
+import pytest
+
 from taggui.widgets.image_list_qt_drag_session_service import QtDragSessionService
-from PySide6.QtCore import QCoreApplication
+from PySide6.QtCore import QCoreApplication, Qt
+from PySide6.QtGui import QGuiApplication
 
 
 APP = QCoreApplication.instance() or QCoreApplication([])
@@ -103,15 +106,21 @@ def test_drag_session_preserves_preexisting_timer_state():
     assert view._qt_drag_active is False
 
 
-def test_drag_session_suspends_and_restores_video_rendering():
+@pytest.mark.parametrize("app_active", [True, False])
+def test_drag_session_resumes_rendering_only_if_app_is_active(monkeypatch, app_active):
     timer = FakeTimer()
     source_model = FakeSourceModel(timer)
     players = [FakeVideoPlayer(), FakeVideoPlayer()]
+    players[1]._display_change_pending = True
     view = FakeView(source_model, window=FakeWindow(players))
     service = QtDragSessionService(view)
 
     state = service.begin()
     assert [player.render_states for player in players] == [[False], [False]]
 
+    app_state = Qt.ApplicationState.ApplicationActive if app_active else Qt.ApplicationState.ApplicationInactive
+    monkeypatch.setattr(QGuiApplication, "applicationState", lambda: app_state)
     service.finish(state)
-    assert [player.render_states for player in players] == [[False, True], [False, True]]
+    assert players[0].render_states == ([False, True] if app_active else [False])
+    assert players[1].render_states == [False]
+    assert not view._qt_drag_active

@@ -16,22 +16,28 @@ from widgets.video_player import PLAYBACK_BACKEND_MPV, VideoPlayerWidget
 APP = QApplication.instance() or QApplication([])
 
 
-def test_application_deactivation_hides_and_suspends_mpv_surface():
+def test_repeated_render_suspension_preserves_surface_to_restore():
+    from qt_test_helpers import dispose_widget
+
     player = VideoPlayerWidget()
     widget = type('FakeGlWidget', (), {'_application_render_suspended': False})()
     player.mpv_widget = widget
     player._mpv_surface_active = True
     visibility = []
-    player._set_mpv_visible = lambda visible, **kwargs: visibility.append(visible)
+    def set_visible(visible, **kwargs):
+        visibility.append(visible)
+        player._mpv_surface_active = visible
 
-    player.set_application_render_active(False)
-
-    assert widget._application_render_suspended is True
-    assert player._mpv_surface_active_before_app_suspend is True
-    assert visibility == [False]
-
-    player.mpv_widget = None
-    player.deleteLater()
+    player._set_mpv_visible = set_visible
+    try:
+        player.set_application_render_active(False)
+        player.set_application_render_active(False)
+        assert widget._application_render_suspended is True
+        assert player._mpv_surface_active_before_app_suspend is True
+        assert visibility == [False]
+    finally:
+        player.mpv_widget = None
+        dispose_widget(player)
 
 
 def test_display_change_releases_mpv_before_adapter_migration(monkeypatch):

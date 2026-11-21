@@ -2,6 +2,10 @@
 
 from __future__ import annotations
 
+from PySide6.QtCore import Qt
+from PySide6.QtGui import QGuiApplication
+
+
 class QtDragSessionService:
     """Keep model/view work stable while ``QDrag.exec()`` processes events."""
 
@@ -67,7 +71,6 @@ class QtDragSessionService:
             "resume_pointer_enrichment": bool(
                 getattr(self._view, "_suppress_selection_commit_until_release", False)
             ),
-            "suspended_video_players": self._suspend_video_rendering(),
         }
 
         self._view._qt_drag_active = True
@@ -80,6 +83,7 @@ class QtDragSessionService:
                 enrichment_timer.stop()
             except Exception:
                 pass
+        state["suspended_video_players"] = self._suspend_video_rendering()
         return state
 
     def finish(self, state):
@@ -111,9 +115,15 @@ class QtDragSessionService:
                 except Exception:
                     pass
         finally:
-            for player in state.get("suspended_video_players", ()):
-                try:
-                    player.set_application_render_active(True)
-                except (RuntimeError, AttributeError):
-                    continue
-            self._view._qt_drag_active = False
+            try:
+                # A drag can end over another application. Its later activation
+                # event will resume rendering when TagGUI regains focus.
+                if QGuiApplication.applicationState() == Qt.ApplicationState.ApplicationActive:
+                    for player in state.get("suspended_video_players", ()):
+                        try:
+                            if not getattr(player, "_display_change_pending", False):
+                                player.set_application_render_active(True)
+                        except (RuntimeError, AttributeError):
+                            continue
+            finally:
+                self._view._qt_drag_active = False

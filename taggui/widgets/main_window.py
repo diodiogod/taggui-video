@@ -787,6 +787,11 @@ class MainWindow(QMainWindow):
         self._display_change_timer.setSingleShot(True)
         self._display_change_timer.setInterval(500)
         self._display_change_timer.timeout.connect(self._finish_display_change)
+        self._activation_context_restore_timer = QTimer(self)
+        self._activation_context_restore_timer.setSingleShot(True)
+        self._activation_context_restore_timer.timeout.connect(
+            self._restore_active_browser_context_after_activation
+        )
         self.app.applicationStateChanged.connect(self._on_application_state_changed)
         self.image_viewer.activated.connect(lambda: self.set_active_viewer(self.image_viewer))
         self.refresh_video_controls_performance_profile()
@@ -1732,6 +1737,11 @@ class MainWindow(QMainWindow):
 
     @Slot()
     def _finish_display_change(self):
+        if self._native_qt_drag_active():
+            # QDrag.exec pumps Qt events inside Windows OLE. Wait before
+            # releasing native renderer resources or creating their replacement.
+            self._display_change_timer.start()
+            return
         pending = list(self._display_move_windows.values())
         self._display_move_windows.clear()
         for _window, viewers in pending:
@@ -5772,23 +5782,30 @@ class MainWindow(QMainWindow):
     def _on_application_state_changed(self, state):
         """Hide floating wall controls when the app is not the active application."""
         app_active = state == Qt.ApplicationState.ApplicationActive
-        for viewer in self._iter_all_viewers():
-            player = getattr(viewer, 'video_player', None)
-            if player is not None:
-                try:
-                    player.set_application_render_active(app_active)
-                except RuntimeError:
-                    pass
+        if not self._native_qt_drag_active():
+            for viewer in self._iter_all_viewers():
+                player = getattr(viewer, 'video_player', None)
+                if player is not None:
+                    try:
+                        player.set_application_render_active(app_active)
+                    except RuntimeError:
+                        pass
         if not app_active:
+            self._activation_context_restore_timer.stop()
             self._selection_wall_speed_overlay.hide()
             return
         self._remember_instance_as_preferred_target()
         self._refresh_selection_wall_speed_overlay()
-        QTimer.singleShot(0, self, self._restore_active_browser_context_after_activation)
+        self._activation_context_restore_timer.start(0)
 
     def _restore_active_browser_context_after_activation(self):
         """Re-sync the anchored viewer after minimize/restore activation."""
         if self._main_window_closing:
+            return
+        if self._native_qt_drag_active():
+            # Restoring the selection can replace the loaded media. Do it
+            # after the native drop completes, including callbacks queued earlier.
+            self._activation_context_restore_timer.start(150)
             return
         manager = getattr(self, '_context_switch_manager', None)
         if manager is None:

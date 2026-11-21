@@ -694,16 +694,16 @@ class VideoPlayerWidget(QWidget):
         gl_widget = getattr(self, 'mpv_widget', None)
 
         if not active:
+            was_active = bool(
+                self._mpv_surface_active
+                or (self._application_render_suspended and self._mpv_surface_active_before_app_suspend)
+            )
             self._application_render_suspended = True
-            was_active = bool(self._mpv_surface_active)
             self._mpv_surface_active_before_app_suspend = was_active
             if gl_widget is not None:
                 gl_widget._application_render_suspended = True
-            if was_active:
+            if self._mpv_surface_active:
                 self._set_mpv_visible(False)
-                # _set_mpv_visible(False) changes the live flag; retain the
-                # intent so activation can restore the surface after settling.
-                self._mpv_surface_active_before_app_suspend = True
             return
 
         if not self._mpv_surface_active_before_app_suspend:
@@ -729,7 +729,7 @@ class VideoPlayerWidget(QWidget):
         # Windows may migrate the top-level window between display adapters
         # while delivering activation/exposure events. Let that finish before
         # entering libmpv's synchronous OpenGL render callback.
-        QTimer.singleShot(350, _resume_after_display_settles)
+        QTimer.singleShot(350, self, _resume_after_display_settles)
 
     def prepare_for_display_change(self) -> bool:
         """Park MPV rendering while a window crosses display adapters.

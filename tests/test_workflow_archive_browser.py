@@ -54,9 +54,26 @@ def test_archived_workflow_drag_payload_and_loose_precedence(prompt_browser, mon
     index = view.currentIndex()
     assert index.data(Qt.UserRole).path == path
     exported = []
+    render_requests = []
+    window.image_viewer._ensure_video_components()
+    monkeypatch.setattr(
+        window.image_viewer.video_player, 'set_application_render_active', render_requests.append,
+    )
     # Keep the native drag loop out of automated tests, but exercise real Qt
     # modifier/mouse input, the production entry point and its actual MIME data.
     def capture(drag, *args):
+        assert window._native_qt_drag_active()
+        assert render_requests[-1] is False
+        before = list(render_requests)
+        window._on_application_state_changed(Qt.ApplicationState.ApplicationActive)
+        assert render_requests == before
+        window._activation_context_restore_timer.stop()
+        window._restore_active_browser_context_after_activation()
+        assert window._activation_context_restore_timer.isActive()
+        window._activation_context_restore_timer.stop()
+        window._finish_display_change()
+        assert window._display_change_timer.isActive()
+        window._display_change_timer.stop()
         exported.append([Path(url.toLocalFile()) for url in drag.mimeData().urls()])
         return Qt.CopyAction
     monkeypatch.setattr(QDrag, 'exec', capture)
